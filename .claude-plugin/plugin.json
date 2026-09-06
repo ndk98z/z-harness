@@ -1,7 +1,7 @@
 {
   "name": "z-harness",
   "description": "Worktree isolation and a plan gate for Claude Code sessions. Every file edit happens on a branch, and edits to paths the repository calls sensitive need a written plan first.",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "author": {
     "name": "Khanh"
   },
