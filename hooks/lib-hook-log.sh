@@ -68,7 +68,7 @@ _hook_log_rotate() {
 
 # Appends one decision.
 #
-# $1 hook name          auto-worktree | check-invariants | check-conventions | verify-before-stop
+# $1 hook name          auto-worktree | require-plan | any hook the installing repository adds
 # $2 session id         already sanitised by the caller, or "-"
 # $3 tool               Edit | Write | Bash | -
 # $4 decision           allow | block | note

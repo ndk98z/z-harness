@@ -2,7 +2,7 @@
 #
 # Shared helper: names the repository's main branch instead of assuming "main".
 #
-# Both the Stop hook and the merge script had the name written in. Renaming the branch would not
+# More than one caller had the name written in. Renaming the branch would not
 # have made either of them fail loudly — `git merge-base main HEAD` on a missing ref just returns
 # nothing, which leaves the changed-file list empty, which means every gate is skipped and the stop
 # is allowed. A guard that answers "nothing to check" when it cannot find its own baseline is worse

@@ -6,7 +6,7 @@
 # worktree provides: changes land directly on the checked-out branch with no
 # diff gate. This hook forces the agent to use `EnterWorktree` (Claude Code's
 # built-in tool) before making any file changes, so that edits go to a
-# throwaway branch and the Stop hook merges them back only after gates pass.
+# throwaway branch and merge-worktree.sh merges them back, fast-forward only.
 #
 # Exit 0 (allow) when already in a worktree.
 # Exit 2 (block) when not, with instructions for the agent.
@@ -153,7 +153,7 @@ To edit files safely:
      restore, docker compose up -d).
   2. Call `EnterWorktree` with a descriptive name.
   3. All edits go into the worktree on a dedicated worktree-* branch.
-  4. The Stop hook merges changes back to main after gates pass.
+  4. Commit in the worktree, then merge it back with merge-worktree.sh.
 
 Read-only tasks (search, review, investigation) do not need a worktree. So does
 writing to /tmp, to build output, or to anything outside this repository.

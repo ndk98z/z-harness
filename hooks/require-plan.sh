@@ -7,20 +7,20 @@
 # deploy path starting from its first tool call, and a typo fix and a rewrite of the go-live sequence
 # travelled the same road.
 #
-# Which paths, and why by path: CONTROL-LOOP-PLAN.md §5 offered three thresholds and the user picked
-# by-path. It reuses the list that already decides when the invariant reviewer is needed
+# Which paths, and why by path: of the thresholds available — by tool, by size of change, by path —
+# only by-path can be answered before the edit happens. It reuses the one list of sensitive paths
 # (lib-sensitive-paths.sh) rather than introducing a second list to drift, and it does not fire on the
 # other several hundred files in the repository — a gate that fires on everything gets removed, which
 # is the Phase 7 lesson.
 #
 # What counts as a plan: a file under .claude/state/ named after the session. Gitignored, so it cannot
-# make a worktree dirty and block the merge the session is working towards. CONTROL-LOOP-PLAN.md §4
+# make a worktree dirty and block the merge the session is working towards. An earlier design
 # proposed the git directory for the same reason and asked for that to be verified — it does not work:
 # a Write to <main>/.git/… is refused by the harness's own worktree isolation, and a Bash redirect
 # there is refused by auto-worktree.sh. Inside the working tree, both tools work.
 #
 # Limit, stated rather than hidden: `printf 'x\ny\nz\n' > plan-<session>.md` passes. Like every hook
-# here it guards against accident, not intent (CLAUDE.md §2). What it changes is that starting without
+# here it guards against accident, not intent. What it changes is that starting without
 # a plan is no longer the path of least resistance.
 #
 # Exit 0 allows. Exit 2 blocks and feeds stderr back to the agent.
@@ -29,7 +29,7 @@ set -uo pipefail
 
 INPUT=$(cat)
 
-# Fast bail, before any subprocess. Unlike check-invariants.sh this one may come first: an unreadable
+# Fast bail, before any subprocess. Unlike a content rule this one may come first: an unreadable
 # payload is already an allow here (see the note on the parse check below), so bailing early cannot
 # turn a refusal into a pass.
 HOOK_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
@@ -51,8 +51,8 @@ source "$HOOK_DIR/lib-sensitive-paths.sh"
 # and how it will be verified; one line is a title, and a title is not a plan.
 MIN_PLAN_LINES=3
 
-# An unreadable payload cannot be judged. Unlike check-invariants.sh this one allows: that hook guards
-# tenant isolation and must fail closed, while this one guards a process step, and blocking every edit
+# An unreadable payload cannot be judged. Unlike a rule that guards correctness, which must fail
+# closed, this one guards a process step, and blocking every edit
 # in a session because one payload was malformed would be the annoyance that gets the hook deleted.
 if ! printf '%s' "$INPUT" | jq -e . > /dev/null 2>&1; then
   hook_log require-plan - - note - unparseable-payload
@@ -142,16 +142,16 @@ fi
 cat >&2 <<EOF
 This call edits code that needs a written plan first:
 $GUARDED
-Those paths are either covered by the six invariants no hook can check (I2, I4, I5, I6, I9, I10) or
-are the harness that checks the other four. Both are places where the cost of a wrong turn is paid by
-someone else — a tenant seeing another tenant's bytes, or a guard that silently stops guarding.
+This repository lists those paths in .claude/harness.json, plus .claude/ itself. Both are places
+where the cost of a wrong turn is paid by someone other than whoever makes it — code whose damage
+does not show up in its own diff, or a guard that silently stops guarding.
 
 Write the plan here, then make this same call again:
   $PLAN_FILE
 
 At least $MIN_PLAN_LINES non-empty lines, covering:
   - what is changing, and which files
-  - which invariants the change is near, and why it does not break them
+  - which of this repository's rules the change is near, and why it does not break them
   - how it will be verified (which test, which gate)
 
 That directory is gitignored on purpose: the plan never shows up in \`git status\`, so it cannot make

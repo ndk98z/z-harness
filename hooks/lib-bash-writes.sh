@@ -10,7 +10,7 @@
 # Deliberately syntactic. This reads shell text with regular expressions; it cannot resolve `$VAR`,
 # command substitution, `sh -c "..."`, or an interpreter writing through its own API. It closes the
 # easy door, which is the one an agent walks through by accident or convenience. It is not a sandbox,
-# and CLAUDE.md §2 already says so about every hook here.
+# and the same is true of every hook here.
 #
 # The first version was cruder than that and blocked real work. It matched every rule against the
 # whole command string with no notion of quoting or of which command a rule belonged to, so a search
@@ -77,7 +77,7 @@ bash_write_is_exempt() {
     # so it can never make a worktree dirty and block the merge. It is inside the working tree instead
     # of in the git directory because the git directory turned out to be unreachable: both the Write
     # tool and a Bash redirect into <main>/.git are refused from a worktree session, the first by the
-    # harness itself. CONTROL-LOOP-PLAN.md §4 assumed the opposite and asked for it to be checked.
+    # harness itself. An earlier design assumed the opposite, and it did not survive being checked.
     .claude/state/*|*/.claude/state/*) return 0 ;;
   esac
 
@@ -91,7 +91,7 @@ bash_write_is_exempt() {
 #
 # The redirection that names the real file (`cat > doc.md <<'EOF'`) is on the command line, so
 # nothing is lost. What goes is the body, which is data: writing a document that quotes
-# `cat > apps/router/src/index.ts` was refused because the quotation was read as a command.
+# `cat > src/index.ts` was refused because the quotation was read as a command.
 _bash_write_strip_heredocs() {
   awk '
     {
@@ -325,15 +325,15 @@ bash_write_targets() {
 # right, and it is exactly what makes this case invisible: the destructive part is not the write, it
 # is that the path is a symlink into a tree the session does not own.
 #
-# `.claude/settings.json` sets `symlinkDirectories`, so every worktree's `apps/web/node_modules` and
-# `apps/router/node_modules` is a symlink into the main working tree. `npm ci` begins by deleting
+# When `.claude/settings.json` sets `worktree.symlinkDirectories`, every worktree's `node_modules`
+# is a symlink into the main working tree. `npm ci` begins by deleting
 # `node_modules` outright — that is what separates it from `npm install` — so run from a worktree it
 # follows the symlink and erases the main tree's real dependency tree, which every other worktree
 # shares. It prints nothing during the unlink, so it reads as a hang rather than as damage, and
 # agent-run Bash has no TTY to interrupt with. The observed outcome was forced editor quits and
 # worktrees left locked.
 #
-# CLAUDE.md §7 step 1 already says dependency setup belongs in the main tree. Until now nothing
+# Dependency setup belongs in the main tree, and saying so in prose was all that held. Nothing
 # enforced it.
 #
 # Keyed on the symlink rather than on "the session is in a worktree", which matters in both
@@ -341,7 +341,7 @@ bash_write_targets() {
 # worktree from anywhere is still caught. It also stays correct if `symlinkDirectories` changes,
 # because it asks the filesystem instead of repeating the list.
 #
-# Fails open when it cannot parse the command. This guards a footgun, not tenant isolation, so a
+# Fails open when it cannot parse the command. This guards a footgun, not correctness, so a
 # missed case costs a re-run of a setup command; a false refusal costs the guard its life. Stated
 # limits, same as everything else here: `sh -c`, `$VAR`, and any indirection get through.
 #
@@ -368,7 +368,7 @@ bash_write_clobbers_linked_deps() {
     first=$(awk '{ for (i = 1; i <= NF; i++) if ($i !~ /=/) { print $i; exit } }' <<< "$segment")
     first="${first##*/}"
 
-    # Same `cd` handling as bash_write_targets, and for the same reason: `cd apps/web && npm ci`
+    # Same `cd` handling as bash_write_targets, and for the same reason: `cd app && npm ci`
     # is the natural way to type this and the segment that runs npm carries no path at all.
     if [[ "$first" == cd ]]; then
       local target_dir
@@ -429,10 +429,10 @@ bash_write_clobbers_linked_deps() {
       [[ "$resolved" = /* ]] || resolved="$(dirname "$dir")/$resolved"
       # Which tree counts as "own" belongs to the directory being installed into, not to the shell's
       # cwd. `--prefix` separates the two, and keying on the cwd got that case backwards: run from the
-      # main tree, `npm ci --prefix <worktree>/apps/web` resolves through the worktree's symlink back
+      # main tree, `npm ci --prefix <worktree>/app` resolves through the worktree's symlink back
       # into the main tree, which the cwd-based test read as "points inside my own tree, harmless" —
-      # the exact deletion this guard exists to refuse, waved through. c239345 claimed this form was
-      # caught; it never was, for apps/web either, so the miss predates apps/admin being listed.
+      # the exact deletion this guard exists to refuse, waved through. A commit upstream claimed this
+      # form was caught; it never was, for any directory in the list.
       dir_own=$(git -C "$(dirname "$dir")" rev-parse --show-toplevel 2>/dev/null || printf '%s' "$own")
       # Pointing inside that tree is harmless; pointing out of it is the whole problem.
       case "$resolved/" in
@@ -449,11 +449,11 @@ bash_write_clobbers_linked_deps() {
 # Prints the install commands that repair the dependency trees a worktree shares, one per line.
 #
 # Generated from `worktree.symlinkDirectories` rather than written out, because a hand-written list
-# stops being true the day an app is added — which is exactly how apps/admin came to be missing from
+# stops being true the day a directory is added — which is exactly how one came to be missing from
 # that setting while the refusal message confidently named the other two.
 #
 # A function, and in this file, so it can be tested the way bash_write_clobbers_linked_deps is. It was
-# four lines inline in check-invariants.sh, and the shape it got wrong is not reachable from the
+# four lines inline in a hook, and the shape it got wrong is not reachable from the
 # current settings: an entry of plain `node_modules` — the repository root, which is what npm
 # workspaces would make the whole list collapse into — left `sub` with an empty string and printed
 # `npm ci --prefix ` with nothing after it. Advice with a missing argument is worse than none, since
