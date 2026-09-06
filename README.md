@@ -153,6 +153,33 @@ at `.claude/state/plan-<session>.md` first — at least three lines: what change
 near, how it will be verified.
 ```
 
+## The progress-reader agent
+
+Ships with the plugin, read-only, and answers one question in at most twenty lines: *where does this
+project stand on X, and what is in the way*. Use it at the start of a session instead of reading a
+handoff file end to end.
+
+It finds the files itself, but tell it where to look and it stops guessing:
+
+```json
+{
+  "stateDocs": {
+    "state":     "docs/PROGRESS.md",
+    "runbook":   "docs/ops-runbook.md",
+    "decisions": "docs/IMPLEMENTATION-PLAN.md",
+    "avoid":     ["docs/briefs/", "docs/architecture.md"]
+  }
+}
+```
+
+With no `stateDocs`, it looks for the conventional names — `PROGRESS.md`, `STATUS.md`, `TODO.md`,
+`RUNBOOK.md` and their `docs/` variants — and says which one it used. A caller who believes it read
+the handoff file when it actually read a stale TODO believes the wrong thing about their own project.
+
+The rule it will not break: it never infers a status from the presence of code. "The endpoint exists"
+is not "the task is done"; when the status table and the code disagree, it reports the disagreement
+rather than picking a side.
+
 ## Content rules
 
 The mechanism a repository states its own invariants through. None of the rules ship with the

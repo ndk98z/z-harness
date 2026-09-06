@@ -717,6 +717,29 @@ expect_eq "2" "$(rules_exit "$BREAKING")" "content: an empty mutation file does 
 
 rm -rf "$RULES"
 
+# --- 12. shipped agents --------------------------------------------------------------------------
+# The same class of case as the executable check on the hooks, for the same reason: an agent file
+# Claude Code cannot parse is not reported as broken, it is simply absent, and absent looks identical
+# to "the caller chose not to use it".
+
+for agent in "$ROOT"/agents/*.md; do
+  [[ -e "$agent" ]] || continue
+  name="${agent##*/}"
+  expect_true "agent has front matter: $name" bash -c 'head -1 "$1" | grep -qx -- ---' _ "$agent"
+  for key in name description tools; do
+    expect_true "agent declares $key: $name" \
+      bash -c 'awk "/^---$/{n++; next} n==1" "$1" | grep -qE "^$2:" ' _ "$agent" "$key"
+  done
+  # The name in the front matter is what the caller types, and a file whose name disagrees with it is
+  # the kind of mismatch nobody notices until the agent cannot be found.
+  declared=$(awk '/^---$/{n++; next} n==1' "$agent" | grep -E '^name:' | head -1 | sed 's/^name:[[:space:]]*//')
+  expect_eq "${name%.md}" "$declared" "agent name matches its filename: $name"
+  # Read-only by construction. An agent shipped with Edit or Write would be editing outside the
+  # worktree the rest of this plugin exists to enforce.
+  expect_false "agent is read-only: $name" \
+    bash -c 'awk "/^---$/{n++; next} n==1" "$1" | grep -E "^tools:" | grep -qE "(Edit|Write|NotebookEdit)"' _ "$agent"
+done
+
 printf '\nhooks: %d passed' "$PASS"
 if [[ $FAIL -gt 0 ]]; then printf ', %d FAILED\n' "$FAIL"; exit 1; fi
 printf '\n'
