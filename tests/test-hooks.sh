@@ -352,6 +352,258 @@ expect_eq "0" "$(conv_exit "$CONV/src/missing.ts")" "conventions: a file that is
 
 rm -rf "$CONV"
 
+# --- 9. the stop gate ----------------------------------------------------------------------------
+# The frame, exercised against gate commands invented here. What is being tested is never a test
+# command's own behaviour: it is which gates the frame decides to run, how it reads their output, what
+# it does with a budget, and whether the merge happens.
+
+STOPREPO=$(mktemp -d)/repo
+mkdir -p "$STOPREPO/.claude" "$STOPREPO/app" "$STOPREPO/other"
+git -C "$STOPREPO" init -q
+git -C "$STOPREPO" config user.name t
+git -C "$STOPREPO" config user.email t@t
+printf 'x\n' > "$STOPREPO/README"
+# The .gitignore the README tells an installing repository to write. Without it the main tree is
+# permanently dirty and every merge is refused — the fixture is set up the documented way so that the
+# case below, which leaves it out on purpose, is testing something real.
+printf '.claude/worktrees/\n.claude/state/\n' > "$STOPREPO/.gitignore"
+git -C "$STOPREPO" add -A
+git -C "$STOPREPO" commit -qm init
+
+# Runs the stop hook against the fixture and prints "<exit>|<stderr on one line>".
+#
+# $1 cwd for the session, $2 stop_hook_active ("true"/"false")
+stop_run() {
+  local cwd="$1" active="${2:-false}" out status
+  out=$(printf '{"session_id":"stoptest","stop_hook_active":%s,"cwd":"%s"}' "$active" "$cwd" \
+    | CLAUDE_HARNESS_HOOK_LOG="$STOPREPO/.git/log.jsonl" CLAUDE_PROJECT_DIR="$STOPREPO" \
+      bash "$ROOT/hooks/verify-before-stop.sh" 2>&1)
+  status=$?
+  printf '%s|%s' "$status" "$(printf '%s' "$out" | tr '\n' ' ')"
+}
+
+# Nothing changed and nothing configured: there is no work for the hook to do.
+expect_eq "0|" "$(stop_run "$STOPREPO")" "stop: clean tree with no configuration passes"
+
+# A gate runs only for the paths it claims. The unmatched gate writes a marker, so "did not run" is
+# an observation rather than an absence.
+cat > "$STOPREPO/.claude/harness.json" <<'JSON'
+{
+  "gates": {
+    "app":   { "match": "^app/",   "dir": "app",   "run": ["true"] },
+    "other": { "match": "^other/", "dir": "other", "run": ["touch ran-other"] }
+  }
+}
+JSON
+printf 'change\n' > "$STOPREPO/app/main.ts"
+RESULT=$(stop_run "$STOPREPO")
+expect_eq "0|" "$RESULT" "stop: a passing gate is silent"
+expect_false "stop: an unmatched gate does not run" test -f "$STOPREPO/other/ran-other"
+
+# A failing command blocks, and the message names the gate rather than only the command.
+cat > "$STOPREPO/.claude/harness.json" <<'JSON'
+{ "gates": { "app": { "match": "^app/", "dir": "app", "run": ["echo boom >&2; false"] } } }
+JSON
+RESULT=$(stop_run "$STOPREPO")
+expect_eq "2" "${RESULT%%|*}" "stop: a failing gate blocks the stop"
+case "$RESULT" in *"--- app"*) check ok "stop: the failure names the gate" ;;
+  *) check no "stop: the failure names the gate" ;; esac
+case "$RESULT" in *boom*) check ok "stop: the failure carries the command output" ;;
+  *) check no "stop: the failure carries the command output" ;; esac
+
+# The commands of one gate stop at the first failure: a suite that cannot build should not then be
+# reported as failing its tests as well.
+cat > "$STOPREPO/.claude/harness.json" <<'JSON'
+{ "gates": { "app": { "match": "^app/", "dir": "app", "run": ["false", "touch ran-second"] } } }
+JSON
+stop_run "$STOPREPO" > /dev/null
+expect_false "stop: commands after a failure do not run" test -f "$STOPREPO/app/ran-second"
+
+# The budget. Three blocked stops, then the escape hatch — loudly, because a stop that gives up must
+# not read as a clean run.
+cat > "$STOPREPO/.claude/harness.json" <<'JSON'
+{ "gates": { "app": { "match": "^app/", "dir": "app", "run": ["false"] } } }
+JSON
+expect_eq "2" "$(stop_run "$STOPREPO" false | cut -d'|' -f1)"  "stop: attempt 1 blocks"
+expect_eq "2" "$(stop_run "$STOPREPO" true  | cut -d'|' -f1)"  "stop: attempt 2 blocks"
+RESULT=$(stop_run "$STOPREPO" true)
+expect_eq "0" "${RESULT%%|*}" "stop: attempt 3 releases rather than looping"
+case "$RESULT" in *"GATES ARE STILL FAILING"*) check ok "stop: the release says nothing was verified" ;;
+  *) check no "stop: the release says nothing was verified" ;; esac
+
+# A green run returns the budget, so a later task in the same session is not judged by an earlier
+# one's failures.
+cat > "$STOPREPO/.claude/harness.json" <<'JSON'
+{ "gates": { "app": { "match": "^app/", "dir": "app", "run": ["true"] } } }
+JSON
+stop_run "$STOPREPO" true > /dev/null
+cat > "$STOPREPO/.claude/harness.json" <<'JSON'
+{ "gates": { "app": { "match": "^app/", "dir": "app", "run": ["false"] } } }
+JSON
+expect_eq "2" "$(stop_run "$STOPREPO" true | cut -d'|' -f1)" "stop: a green run refills the budget"
+
+# The note channel. A missing local daemon is not a broken gate, and treating it as one blocks every
+# stop on that machine until someone deletes the hook.
+cat > "$STOPREPO/.claude/harness.json" <<'JSON'
+{ "gates": { "app": { "match": "^app/", "dir": "app", "run": ["echo '### NOTE integration tests skipped'"] } } }
+JSON
+RESULT=$(stop_run "$STOPREPO")
+expect_eq "0" "${RESULT%%|*}" "stop: a note does not block"
+case "$RESULT" in *"integration tests skipped"*) check ok "stop: a note is said out loud" ;;
+  *) check no "stop: a note is said out loud" ;; esac
+
+# A command that declares a failure and exits 0 is still a failure: the protocol is what it says, not
+# what its exit code says.
+cat > "$STOPREPO/.claude/harness.json" <<'JSON'
+{ "gates": { "app": { "match": "^app/", "dir": "app", "run": ["echo '### FAIL suite'; echo detail"] } } }
+JSON
+expect_eq "2" "$(stop_run "$STOPREPO" | cut -d'|' -f1)" "stop: a declared failure blocks despite exit 0"
+
+# A gate naming a directory that is not in this tree is a note, not a failure. Blocking there would
+# stop every session in a repository that removed a directory.
+cat > "$STOPREPO/.claude/harness.json" <<'JSON'
+{ "gates": { "app": { "match": "^app/", "dir": "gone", "run": ["false"] } } }
+JSON
+RESULT=$(stop_run "$STOPREPO")
+expect_eq "0" "${RESULT%%|*}" "stop: a missing gate directory does not block"
+case "$RESULT" in *"directory missing"*) check ok "stop: a missing gate directory is said out loud" ;;
+  *) check no "stop: a missing gate directory is said out loud" ;; esac
+
+# The review receipt, which is the whole mechanism for a rule no hook can read out of a diff.
+cat > "$STOPREPO/.claude/harness.json" <<'JSON'
+{ "sensitivePaths": ["^app/"], "reviewReceipt": { "agent": "invariant-reviewer" } }
+JSON
+RESULT=$(stop_run "$STOPREPO")
+expect_eq "2" "${RESULT%%|*}" "stop: a sensitive change without a receipt blocks"
+case "$RESULT" in *invariant-reviewer*) check ok "stop: the block names the reviewer to run" ;;
+  *) check no "stop: the block names the reviewer to run" ;; esac
+
+mkdir -p "$STOPREPO/.claude/state"
+printf '{"ok":true}' > "$STOPREPO/.claude/state/review-$(git -C "$STOPREPO" rev-parse HEAD).json"
+expect_eq "0" "$(stop_run "$STOPREPO" | cut -d'|' -f1)" "stop: a receipt for HEAD satisfies the gate"
+
+# Not opt-in means not enforced: a repository that declares no reviewer is never asked for a receipt.
+cat > "$STOPREPO/.claude/harness.json" <<'JSON'
+{ "sensitivePaths": ["^app/"] }
+JSON
+rm -rf "$STOPREPO/.claude/state"
+expect_eq "0" "$(stop_run "$STOPREPO" | cut -d'|' -f1)" "stop: no reviewer configured means no receipt"
+
+# --- 10. the stop gate inside a worktree ---------------------------------------------------------
+# The payoff, and the part that has to work for the plugin to be worth installing: gates green, branch
+# merged, without anybody typing a merge command.
+
+# The configuration is committed before the branch is cut. Committing to the main branch after the
+# worktree exists makes the branch diverge, and a fast-forward-only merge then correctly refuses —
+# which is the behaviour under test two cases further down, not here.
+cat > "$STOPREPO/.claude/harness.json" <<'JSON'
+{ "gates": { "app": { "match": "^app/", "dir": "app", "run": ["true"] } } }
+JSON
+git -C "$STOPREPO" add -A > /dev/null 2>&1
+git -C "$STOPREPO" commit -qm "work so far" > /dev/null 2>&1
+
+WT="$STOPREPO/.claude/worktrees/feature"
+git -C "$STOPREPO" worktree add -q -b worktree-feature "$WT" > /dev/null 2>&1
+printf 'from the worktree\n' > "$WT/app/feature.ts"
+git -C "$WT" add -A
+git -C "$WT" commit -qm "feature work"
+
+RESULT=$(stop_run "$WT")
+expect_eq "0" "${RESULT%%|*}" "stop: a worktree session with green gates is allowed to finish"
+expect_true "stop: the worktree branch was merged into the main branch" \
+  bash -c 'git -C "$1" log --oneline "$(git -C "$1" rev-parse --abbrev-ref HEAD)" | grep -q "feature work"' _ "$STOPREPO"
+
+# A branch that has fallen behind the main branch is refused rather than merged, and the refusal names
+# the rebase. Fast-forward only is what makes the merge safe to run unattended.
+WT3="$STOPREPO/.claude/worktrees/diverged"
+git -C "$STOPREPO" worktree add -q -b worktree-diverged "$WT3" > /dev/null 2>&1
+printf 'branch side\n' > "$WT3/app/branch.ts"
+git -C "$WT3" add -A
+git -C "$WT3" commit -qm "branch work"
+printf 'main side\n' > "$STOPREPO/app/main-side.ts"
+git -C "$STOPREPO" add -A > /dev/null 2>&1
+git -C "$STOPREPO" commit -qm "main moved" > /dev/null 2>&1
+RESULT=$(stop_run "$WT3")
+expect_eq "2" "${RESULT%%|*}" "stop: a diverged branch is not merged"
+case "$RESULT" in *rebase*) check ok "stop: the refusal names the rebase" ;;
+  *) check no "stop: the refusal names the rebase" ;; esac
+git -C "$STOPREPO" worktree remove --force "$WT3" > /dev/null 2>&1
+git -C "$STOPREPO" branch -D worktree-diverged > /dev/null 2>&1
+
+# A committed branch is judged by the whole branch, not by its uncommitted files. Judging it by the
+# working tree alone would mean committing — the step that makes the merge possible — is what makes
+# every gate skip.
+#
+# Its own fixture, and deliberately so: the first version of this case reused the repository above and
+# passed under a mutant that removed the branch diff entirely, because its exit code was coming from
+# somewhere else. A case that cannot fail is not a case.
+BRANCHED=$(mktemp -d)/repo
+mkdir -p "$BRANCHED/.claude" "$BRANCHED/app"
+git -C "$BRANCHED" init -q
+git -C "$BRANCHED" config user.name t
+git -C "$BRANCHED" config user.email t@t
+printf '.claude/worktrees/\n.claude/state/\n' > "$BRANCHED/.gitignore"
+printf 'a\n' > "$BRANCHED/app/main.ts"
+cat > "$BRANCHED/.claude/harness.json" <<'JSON'
+{ "gates": { "app": { "match": "^app/", "dir": "app", "run": ["false"] } } }
+JSON
+git -C "$BRANCHED" add -A
+git -C "$BRANCHED" commit -qm init
+git -C "$BRANCHED" worktree add -q -b worktree-branched "$BRANCHED/.claude/worktrees/w" > /dev/null 2>&1
+printf 'b\n' > "$BRANCHED/.claude/worktrees/w/app/new.ts"
+git -C "$BRANCHED/.claude/worktrees/w" add -A
+git -C "$BRANCHED/.claude/worktrees/w" commit -qm "committed work"
+
+branched_run() {
+  printf '{"session_id":"branched","stop_hook_active":false,"cwd":"%s"}' "$BRANCHED/.claude/worktrees/w" \
+    | CLAUDE_HARNESS_HOOK_LOG="$BRANCHED/.git/log.jsonl" CLAUDE_PROJECT_DIR="$BRANCHED" \
+      bash "$ROOT/hooks/verify-before-stop.sh" > /dev/null 2>&1
+  printf '%s' "$?"
+}
+expect_eq "2" "$(branched_run)" "stop: a clean worktree is still gated by what its branch committed"
+expect_true "stop: an ungated branch is not merged" \
+  bash -c '! git -C "$1" log --oneline master 2>/dev/null | grep -q "committed work"' _ "$BRANCHED"
+rm -rf "$(dirname "$BRANCHED")"
+
+# What actually refuses the merge, checked rather than assumed. The check reads
+# `--untracked-files=no`, so an untracked directory — including an un-ignored .claude/worktrees/ —
+# does not block it; a tracked file with uncommitted changes does, because the merge checks files out
+# in that tree and would overwrite them. This case exists because the README claimed the opposite
+# until it was run.
+DIRTY=$(mktemp -d)/repo
+mkdir -p "$DIRTY"
+git -C "$DIRTY" init -q
+git -C "$DIRTY" config user.name t
+git -C "$DIRTY" config user.email t@t
+printf 'x\n' > "$DIRTY/README"
+git -C "$DIRTY" add -A
+git -C "$DIRTY" commit -qm init
+git -C "$DIRTY" worktree add -q -b worktree-dirty "$DIRTY/.claude/worktrees/dirty" > /dev/null 2>&1
+printf 'work\n' > "$DIRTY/.claude/worktrees/dirty/thing.ts"
+git -C "$DIRTY/.claude/worktrees/dirty" add -A
+git -C "$DIRTY/.claude/worktrees/dirty" commit -qm "worktree work"
+
+# The worktree directory itself is untracked here, and that alone does not stop the merge.
+MERGE_OUT=$(bash "$ROOT/hooks/merge-worktree.sh" "$DIRTY/.claude/worktrees/dirty" "$DIRTY/.claude/worktrees/dirty" 2>&1)
+expect_eq "0" "$?" "merge: an untracked directory in the main tree does not block"
+
+# An uncommitted change to a tracked file does.
+git -C "$DIRTY" worktree add -q -b worktree-second "$DIRTY/.claude/worktrees/second" > /dev/null 2>&1
+printf 'more\n' > "$DIRTY/.claude/worktrees/second/second.ts"
+git -C "$DIRTY/.claude/worktrees/second" add -A
+git -C "$DIRTY/.claude/worktrees/second" commit -qm "second work"
+printf 'edited in the main tree\n' > "$DIRTY/README"
+MERGE_OUT=$(bash "$ROOT/hooks/merge-worktree.sh" "$DIRTY/.claude/worktrees/second" "$DIRTY/.claude/worktrees/second" 2>&1)
+MERGE_CODE=$?
+expect_eq "2" "$MERGE_CODE" "merge: uncommitted changes in the main tree refuse the merge"
+case "$MERGE_OUT" in *"main working tree"*|*uncommitted*|*clean*)
+    check ok "merge: the refusal says the main tree is not clean" ;;
+  *) check no "merge: the refusal says the main tree is not clean (got: $(printf '%s' "$MERGE_OUT" | tr '\n' ' '))" ;;
+esac
+rm -rf "$(dirname "$DIRTY")"
+
+rm -rf "$(dirname "$STOPREPO")"
+
 printf '\nhooks: %d passed' "$PASS"
 if [[ $FAIL -gt 0 ]]; then printf ', %d FAILED\n' "$FAIL"; exit 1; fi
 printf '\n'

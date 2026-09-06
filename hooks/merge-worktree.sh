@@ -25,24 +25,36 @@ SESSION_CWD="${2:-$PWD}"
 
 # shellcheck source=/dev/null
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib-main-branch.sh"
+# shellcheck source=/dev/null
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib-sensitive-paths.sh"
 
 # Main repository root. `--git-common-dir` returns "<repo>/.git" from both the
 # main working tree and a linked worktree, unlike `--show-toplevel`, which
 # returns the worktree root when called inside one.
+#
+# Asked of the worktree being merged when one was named, and only of the shell's own directory
+# otherwise. Reading the cwd unconditionally is a bug this script had: told to merge a worktree in
+# one repository while the shell stood in another, it resolved the second repository's root, decided
+# the named path was not one of its worktrees, and exited 0 — merging nothing and reporting success.
+# The Stop hook happened to hide it by changing directory first; running the script by hand, which
+# the header above advertises, did not.
+#
+# $1 directory to ask from (optional)
 resolve_project_dir() {
-  local common
-  common=$(git rev-parse --git-common-dir 2>/dev/null || true)
+  local from="${1:-$PWD}" common
+  [[ -d "$from" ]] || from="$PWD"
+  common=$(git -C "$from" rev-parse --git-common-dir 2>/dev/null || true)
   if [[ -n "$common" ]]; then
-    [[ "$common" = /* ]] || common="$PWD/${common#./}"
+    [[ "$common" = /* ]] || common="$from/${common#./}"
     if [[ "$common" == */.git ]]; then
       printf '%s' "${common%/.git}"
       return 0
     fi
   fi
-  git rev-parse --show-toplevel 2>/dev/null || true
+  git -C "$from" rev-parse --show-toplevel 2>/dev/null || true
 }
 
-PROJECT_DIR=$(resolve_project_dir)
+PROJECT_DIR=$(resolve_project_dir "${WORKTREE:-$PWD}")
 PROJECT_DIR="${PROJECT_DIR%/}"
 [[ -n "$PROJECT_DIR" && -d "$PROJECT_DIR" ]] || exit 0
 
@@ -51,8 +63,10 @@ MAIN_BRANCH=$(main_branch_name "$PROJECT_DIR")
 
 # True when the path is a directory inside .claude/worktrees/ of this repository.
 is_session_worktree() {
-  local path="${1%/}"
-  [[ -n "$path" && "${path#"$PROJECT_DIR"/}" == .claude/worktrees/* ]]
+  local path root
+  path=$(harness_realpath "${1%/}")
+  root=$(harness_realpath "$PROJECT_DIR")
+  [[ -n "$path" && "${path#"$root"/}" == .claude/worktrees/* ]]
 }
 
 # Falls back to detection when no path was passed: the current directory if it is

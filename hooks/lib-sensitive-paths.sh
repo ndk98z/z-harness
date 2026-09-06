@@ -77,6 +77,34 @@ plan_paths_regex() {
   fi
 }
 
+# Prints a path with every symlink in it resolved, so two spellings of one directory compare equal.
+#
+# Needed because the two sides of every "is this inside the repository" test arrive by different
+# routes: Claude Code hands over the path the user typed, and git answers with the physical one. On
+# macOS that is not a corner case — /tmp and /var/folders are symlinks into /private, so a repository
+# under either has two names and a plain prefix test between them silently answers no. The observed
+# consequence was a worktree merge that did nothing at all and reported success.
+#
+# Falls back to the path unchanged when its parent does not exist, since a path that is not there yet
+# has nothing to resolve.
+#
+# $1 path
+harness_realpath() {
+  local path="${1%/}" dir base
+  [[ -n "$path" ]] || return 0
+  if [[ -d "$path" ]]; then
+    (cd "$path" 2>/dev/null && pwd -P) || printf '%s' "$path"
+    return 0
+  fi
+  dir=$(dirname "$path")
+  base=$(basename "$path")
+  if [[ -d "$dir" ]]; then
+    printf '%s/%s' "$(cd "$dir" && pwd -P)" "$base"
+  else
+    printf '%s' "$path"
+  fi
+}
+
 # Prints a path as the repository sees it: relative to the repository root, with any worktree prefix
 # removed.
 #

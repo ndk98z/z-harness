@@ -1,7 +1,7 @@
 {
   "name": "z-harness",
-  "description": "Worktree isolation and a plan gate for Claude Code sessions. Every file edit happens on a branch, and edits to paths the repository calls sensitive need a written plan first.",
-  "version": "0.2.0",
+  "description": "Worktree isolation, a plan gate, and a gate-before-stop for Claude Code sessions. Every file edit happens on a branch, the branch is only merged once the repository's own gates pass, and sensitive paths need a written plan first.",
+  "version": "0.3.0",
   "author": {
     "name": "Khanh"
   },
@@ -31,6 +31,17 @@
             "type": "command",
             "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/check-conventions.sh\"",
             "timeout": 15
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/verify-before-stop.sh\"",
+            "timeout": 1200
           }
         ]
       }

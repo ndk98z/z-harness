@@ -68,9 +68,19 @@ Entirely opt-in. With no `conventions` block in `.claude/harness.json` it reads 
 naming paths is how the upstream version failed, when the same generator wrote a second file nobody
 had added to the list.
 
-**Merge helper** (`merge-worktree.sh`). Fast-forward-only merge of a worktree branch into the main
-branch, run from the main working tree. Refuses a dirty worktree. In this version it is **not wired
-to a hook** — see [Not in 0.1.0](#not-in-010).
+**Gate before stop** (`verify-before-stop.sh`, `Stop`). Works out what the session changed, runs the
+gates that cover it, and blocks the stop while any of them is red. Then merges the worktree branch —
+fast-forward only, and only once the gates are green. See [Gates](#gates).
+
+**Merge helper** (`merge-worktree.sh`). The merge itself, also runnable by hand from anywhere:
+
+```bash
+bash <plugin>/hooks/merge-worktree.sh <worktree path>
+```
+
+Fast-forward only, so a branch that has fallen behind is refused with the rebase to run rather than
+merged. Refuses a dirty worktree, and a main working tree with uncommitted changes to tracked files —
+untracked files there do not block it.
 
 ## Install
 
@@ -104,8 +114,10 @@ Add to that repository's `.gitignore`:
 .claude/state/
 ```
 
-Both matter. An un-ignored `.claude/worktrees/` leaves the main tree permanently dirty, which makes
-the merge refuse **every** time, silently.
+Both matter, though not for the reason an earlier version of this file gave. The merge's cleanliness
+check reads `--untracked-files=no`, so an un-ignored `.claude/worktrees/` does not refuse the merge —
+tested, after the claim that it did turned out to be false. What it does do is put every worktree's
+files in reach of `git add -A` in the main tree, and fill `git status` with them.
 
 ## Tell the model the workflow
 
@@ -122,23 +134,72 @@ Every file edit must happen inside a git worktree. The main working tree is for 
    only Edit/Write are blocked.
 2. **Edit** (worktree): call `EnterWorktree` with a descriptive name. The worktree is created at
    `.claude/worktrees/{name}` on branch `worktree-{name}`.
-3. **Commit inside the worktree** before finishing. A dirty worktree cannot be merged.
-4. **Merge**: run `bash <plugin>/hooks/merge-worktree.sh`. Do not merge by hand, and never with
-   `git update-ref` — that moves the pointer without touching the main tree's index, so main
+3. **Commit inside the worktree** before finishing. A dirty worktree cannot be merged, so an
+   uncommitted change means the work stays on the branch.
+4. **Merging is automatic** once the gates pass — do not merge by hand, and never with
+   `git update-ref`: that moves the pointer without touching the main tree's index, so main
    immediately reports the whole merge as staged changes in reverse.
 
-If the merge fails, the branch has diverged: `git rebase main` inside the worktree, then retry.
+If the merge is refused because the branch has diverged, `git rebase main` inside the worktree and
+stop again. If you are told the merge is still failing, the work is on the branch and nowhere else —
+say so, name the branch, and do not report the task as merged.
 
 Editing any path listed in `.claude/harness.json`, or anything under `.claude/`, requires a plan
 at `.claude/state/plan-<session>.md` first — at least three lines: what changes, what it sits
 near, how it will be verified.
 ```
 
-## Not in 0.1.0
+## Gates
 
-- **No `Stop` gate.** The upstream `verify-before-stop.sh` runs a repository's test gates before a
-  session may finish, and it is what calls the merge helper. It needs the gate table to become
-  configuration first. Until then, **the merge is manual** — nothing runs it for you.
+`verify-before-stop.sh` is a frame with no commands of its own. What runs comes from
+`.claude/harness.json`:
+
+```json
+{
+  "gates": {
+    "router": { "match": "^apps/router/",                  "dir": "apps/router", "run": ["npm run lint", "npm test"] },
+    "web":    { "match": "^(apps/web/|packages/core/)",    "dir": "apps/web",    "run": ["npm run build", "npm test"] }
+  },
+  "reviewReceipt": { "agent": "invariant-reviewer" }
+}
+```
+
+Gates run in the order written, and only when `match` — an extended regular expression — hits one of
+the changed paths. A shared package that two applications import belongs in both patterns; a change
+to it should run both. A gate's commands run in `dir` in order and stop at the first failure, so a
+suite that could not build is not also reported as failing its tests. Passing gates are silent.
+
+The changed set is the uncommitted files, and in a worktree the whole branch as well. That second
+half matters: judged by uncommitted files alone, committing — the step that makes the merge possible
+— is what makes every gate skip.
+
+A command can say something without failing:
+
+```
+### NOTE integration tests skipped
+```
+
+printed on stdout is surfaced to the model and does not block the stop. A missing local Docker daemon
+is not a broken gate, and treating it as one blocks every stop on that machine until someone deletes
+the hook. `### FAIL <name>` is accepted the same way, for a command that reports several results in
+one run.
+
+**Budgets.** Red gates block at most three stops, then the stop is allowed through with a message in
+capitals saying nothing was verified. A guard that can trap a session in a loop gets removed rather
+than fixed. A failing merge has the *same* budget on a *separate* counter — sharing one means two
+unrelated failures spend the same budget, and since a green gate clears the gate counter, a shared
+counter never counts at all and a session that cannot merge can never stop.
+
+**`reviewReceipt`** (optional). When a change touches a path in `sensitivePaths`, the stop is blocked
+until `.claude/state/review-<HEAD sha>.json` exists, and the message names the agent to run. It is
+the answer to rules no hook can read out of a diff — write order, where a value came from, whether an
+operation is idempotent. A gate that cannot observe its own condition must not block, so the receipt
+is what makes the condition observable. Keyed to HEAD, so committing again invalidates it: that is a
+different diff. Stated limit — an agent that writes the file without reading anything passes. This
+guards against forgetting, not against intent.
+
+## Not yet here
+
 - **No content rules.** The upstream `check-invariants.sh` compares text about to be written against
   a table of product rules. The mechanism generalises; the rules do not, so neither ships here yet.
 
