@@ -21,7 +21,7 @@
 #   hook_log <hook> <session> <tool> <decision> <target> <reason>
 #
 # Read it back with, for example:
-#   jq -s 'group_by(.reason) | map({(.[0].reason): length}) | add' "$(git rev-parse --git-common-dir)/claude-harness-hooks.jsonl"
+#   jq -s 'group_by(.reason) | map({(.[0].reason): length}) | add' "$(git rev-parse --git-common-dir)/z-harness-hooks.jsonl"
 
 # Most lines to keep before trimming, and how many survive a trim. Small enough that the file stays
 # readable by hand and never grows without bound; large enough to cover many sessions.
@@ -35,13 +35,13 @@ _HOOK_LOG_KEEP_LINES=2500
 # what makes that work from a linked worktree, where "$PROJECT_DIR/.git" is a file rather than a
 # directory — the same trap that silently broke the stop-attempt counter.
 #
-# CLAUDE_HARNESS_HOOK_LOG overrides the location. Only test-hooks.sh sets it, so that a suite which drives
+# Z_HARNESS_HOOK_LOG overrides the location. Only test-hooks.sh sets it, so that a suite which drives
 # every hook dozens of times does not fill the repository's own log with synthetic decisions — the
 # log exists to describe real sessions, and test traffic in it would make the false-positive counts
 # it is meant to answer meaningless.
 _hook_log_path() {
-  if [[ -n "${CLAUDE_HARNESS_HOOK_LOG:-}" ]]; then
-    printf '%s' "$CLAUDE_HARNESS_HOOK_LOG"
+  if [[ -n "${Z_HARNESS_HOOK_LOG:-}" ]]; then
+    printf '%s' "$Z_HARNESS_HOOK_LOG"
     return 0
   fi
 
@@ -51,7 +51,7 @@ _hook_log_path() {
   [[ "$common" = /* ]] || common="$PWD/${common#./}"
   [[ -d "$common" ]] || return 1
 
-  printf '%s/claude-harness-hooks.jsonl' "$common"
+  printf '%s/z-harness-hooks.jsonl' "$common"
 }
 
 # Keeps the tail of the log once it grows past the cap.

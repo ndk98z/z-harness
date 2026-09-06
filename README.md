@@ -1,4 +1,4 @@
-# claude-harness
+# z-harness
 
 Worktree isolation and a plan gate for Claude Code sessions, packaged as a plugin.
 
@@ -31,13 +31,13 @@ always in the gated set: editing a hook cannot break your invariants, but it can
 check that would have caught something that does.
 
 **Decision log** (`lib-hook-log.sh`). Every hook decision, `allow` as well as `block`, appended as
-JSONL to `$(git rev-parse --git-common-dir)/claude-harness-hooks.jsonl` — inside the git directory,
+JSONL to `$(git rev-parse --git-common-dir)/z-harness-hooks.jsonl` — inside the git directory,
 never in a working tree, because a log file in the tree makes every worktree dirty and every merge
 refuse. Paths and reason codes only, never file contents.
 
 ```bash
 jq -s 'group_by(.reason) | map({(.[0].reason): length}) | add' \
-  "$(git rev-parse --git-common-dir)/claude-harness-hooks.jsonl"
+  "$(git rev-parse --git-common-dir)/z-harness-hooks.jsonl"
 ```
 
 Logging the allows is the point. Without a denominator, a false-refusal rate is not computable, and
@@ -52,8 +52,8 @@ to a hook** — see [Not in 0.1.0](#not-in-010).
 From a local directory, which is enough to try it and needs no remote:
 
 ```
-/plugin marketplace add /absolute/path/to/claude-harness
-/plugin install claude-harness@claude-harness
+/plugin marketplace add /absolute/path/to/z-harness
+/plugin install z-harness@z-harness
 ```
 
 ## Configure the repository

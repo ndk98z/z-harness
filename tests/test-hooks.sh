@@ -149,10 +149,10 @@ expect_false "worktree edit to an ordinary path is still not gated" \
 # shellcheck source=/dev/null
 source "$ROOT/hooks/lib-hook-log.sh"
 LOG_OVERRIDE=$(mktemp -d)/log.jsonl
-expect_eq "$LOG_OVERRIDE" "$(CLAUDE_HARNESS_HOOK_LOG="$LOG_OVERRIDE" _hook_log_path)" \
+expect_eq "$LOG_OVERRIDE" "$(Z_HARNESS_HOOK_LOG="$LOG_OVERRIDE" _hook_log_path)" \
   "log path: environment override wins"
 expect_true "log path: default sits in the git directory" \
-  bash -c 'cd "$1" && p=$(source "$2/hooks/lib-hook-log.sh" && _hook_log_path) && [[ "$p" == *"/.git/claude-harness-hooks.jsonl" ]]' _ "$ROOT" "$ROOT"
+  bash -c 'cd "$1" && p=$(source "$2/hooks/lib-hook-log.sh" && _hook_log_path) && [[ "$p" == *"/.git/z-harness-hooks.jsonl" ]]' _ "$ROOT" "$ROOT"
 
 rm -rf "$BARE" "$CONF"
 
