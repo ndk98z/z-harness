@@ -156,6 +156,118 @@ expect_true "log path: default sits in the git directory" \
 
 rm -rf "$BARE" "$CONF"
 
+# --- 6. the write detector ---------------------------------------------------------------------
+# lib-bash-writes decides which shell commands write a file. It is the largest and least obvious
+# part of the plugin, and its patterns have twice been adjusted by guesswork. Every case below is
+# ported from the suite it grew up in, with the paths made generic.
+#
+# The allow half is not padding. A guard that refuses `grep -rn 'tee -a' .` refuses the exact kind
+# of command someone uses to investigate the guard, and a guard that gets in the way of reading is
+# removed rather than reported.
+
+# shellcheck source=/dev/null
+source "$ROOT/hooks/lib-bash-writes.sh"
+REPO="$ROOT"
+
+# Asserts that bash_write_targets does or does not flag a command.
+#
+# $1 "flag" or "allow", $2 case name, $3 command text
+expect_write() {
+  local want="$1" name="$2" cmd="$3" out got
+  out=$(bash_write_targets "$cmd" "$REPO")
+  got="allow"; [[ -n "$out" ]] && got="flag"
+  if [[ "$got" == "$want" ]]; then check ok "$name"; else check no "write: $name (want $want, got $got)"; fi
+}
+
+# Writes, in the plainest forms.
+expect_write flag  "heredoc redirect into src"      'cat > src/index.ts <<EOF'
+expect_write flag  "append redirect into src"       'echo x >> src/index.ts'
+expect_write flag  "sed -i on a source file"        "sed -i '' 's/a/b/' src/headers.ts"
+expect_write flag  "tee into a source file"         'tee src/Program.cs'
+expect_write flag  "python open(...,w)"             "python3 -c \"open('src/layout.ts','w').write('x')\""
+expect_write flag  "cp over a tracked file"         'cp /tmp/a src/main.tsx'
+
+# Not writes: scratch space, file descriptors, and reads.
+expect_write allow "redirect to /tmp"               'npm test > /tmp/out.log'
+expect_write allow "redirect to /dev/null"          'docker info > /dev/null 2>&1'
+expect_write allow "fd duplication, not a file"     'npm test 2>&1 | tail -5'
+expect_write allow "read-only git"                  'git status --porcelain'
+expect_write allow "grep with a pipe"               'grep -rn foo src/ | head'
+expect_write allow "build output is not code"       'dotnet run > TestResults/x.log'
+
+# Commands that merely mention a writing command. The first version of the detector refused all of
+# these, which made the tools for investigating the harness unusable inside the harness.
+expect_write allow "grep for the word tee"          "grep -rn 'tee -a' hooks"
+expect_write allow "grep for a redirect"            "grep -rn '>> .*\.log' hooks"
+expect_write allow "rg for the word cp"             "rg 'cp a b' src/"
+expect_write allow "printf format string"           "printf '[%s]\n' src/index.ts"
+expect_write allow "sed without -i is a read"       "sed -n '1,5p' src/index.ts"
+expect_write allow "find naming a source file"      "find src -name 'index.ts' -newer src/layout.ts"
+
+# The same commands actually doing the thing, so the exemptions above are narrow rather than blind.
+expect_write flag  "cp really overwriting source"   'cp /tmp/x src/index.ts'
+expect_write flag  "sed -i really editing source"   "sed -i.bak 's/a/b/' src/layout.ts"
+expect_write flag  "tee after a real pipe"          'echo x | tee src/headers.ts'
+
+# Heredoc bodies are text, not commands. A document that quotes a write is not a write.
+HEREDOC_DOC=$(printf 'cat <<EOF\ncp /tmp/x src/index.ts\nEOF')
+expect_write allow "heredoc body quoting commands"  "$HEREDOC_DOC"
+HEREDOC_SRC=$(printf 'cat > src/index.ts <<EOF\nexport const x = 1\nEOF')
+expect_write flag  "heredoc really writing source"  "$HEREDOC_SRC"
+
+# Quoted text is likewise not a command.
+expect_write allow "escaped quotes inside an argument" \
+  "git commit -m \"cp /tmp/x src/index.ts\""
+expect_write allow "escaped quotes around a redirect" \
+  "echo \"writes with > src/index.ts\""
+expect_write flag  "escaped quotes, then a real write" \
+  "echo \"a > b\" > src/index.ts"
+
+# A shell inside the shell. Stated limit rather than a claim of coverage: these are caught because
+# the inner command is still visible as text on the line.
+expect_write flag  "sh -c hiding a redirect"        'sh -c "cat > src/index.ts"'
+expect_write flag  "bash -c hiding a sed -i"        "bash -c \"sed -i '' s/a/b/ src/layout.ts\""
+expect_write allow "sh -c doing something harmless" 'sh -c "git status --porcelain"'
+
+# Interpreters write without a redirect.
+expect_write flag  "pathlib write_text"             "python3 -c \"import pathlib; pathlib.Path('src/x.ts').write_text('y')\""
+expect_write flag  "node createWriteStream"         "node -e \"require('fs').createWriteStream('src/x.ts')\""
+expect_write allow "python open with no mode"       "python3 -c \"print(open('src/index.ts').read())\""
+expect_write allow "pathlib read_text"              "python3 -c \"import pathlib; print(pathlib.Path('src/index.ts').read_text())\""
+
+# Where a relative path lands depends on what the command did first. Resolving every relative path
+# against the repository root refused commands that wrote nothing in the repository — twice.
+expect_write allow "cd outside the repo, then write" 'cd ~/.claude && jq . settings.json > settings.json'
+expect_write allow "cd to /tmp, then write"          'cd /tmp && echo x > notes.txt'
+expect_write flag  "cd into the repo, then write"    'cd src && echo x > index.ts'
+expect_write flag  "cd away, absolute write back in" "cd /tmp && echo x > $REPO/src/index.ts"
+expect_write allow "cd away, relative path follows"  'cd /tmp && echo x > src/index.ts'
+expect_write flag  "cd \$SOMEWHERE stays strict"     'cd "$SOMEWHERE" && echo x > src/index.ts'
+
+# Session state is written by agents, not by hooks, and is gitignored so it cannot dirty a worktree.
+expect_write allow "write into .claude/state"       'echo x > .claude/state/plan-abc.md'
+expect_write allow "receipt via heredoc"            'cat > .claude/state/review-abc.json <<EOF'
+expect_write flag  "CI config is not state"         'echo x > .github/workflows/ci.yml'
+expect_write flag  "the hooks are not state"        'echo x > .claude/hooks/guard.sh'
+
+# --- 7. the npm ci remedy ------------------------------------------------------------------------
+# Generated from worktree.symlinkDirectories rather than written out, because a hand-written list
+# stops being true the day a directory is added. Advice with a missing argument is worse than none:
+# it looks runnable.
+
+REMEDY=$(mktemp -d)
+printf '%s' '{"worktree":{"symlinkDirectories":["app/node_modules"]}}' > "$REMEDY/per-app.json"
+printf '%s' '{"worktree":{"symlinkDirectories":["node_modules"]}}'     > "$REMEDY/root.json"
+printf '%s' '{}'                                                        > "$REMEDY/absent.json"
+
+expect_eq "  npm ci --prefix app" "$(linked_deps_remedy "$REMEDY/per-app.json")" \
+  "remedy: a per-directory entry names its directory"
+expect_eq "  npm ci" "$(linked_deps_remedy "$REMEDY/root.json")" \
+  "remedy: a repository-root entry does not print a dangling --prefix"
+expect_eq "  npm ci --prefix <app>" "$(linked_deps_remedy "$REMEDY/absent.json")" \
+  "remedy: no configuration still prints something actionable"
+rm -rf "$REMEDY"
+
 printf '\nhooks: %d passed' "$PASS"
 if [[ $FAIL -gt 0 ]]; then printf ', %d FAILED\n' "$FAIL"; exit 1; fi
 printf '\n'
