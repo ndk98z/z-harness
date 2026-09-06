@@ -1,7 +1,7 @@
 {
   "name": "z-harness",
   "description": "Worktree isolation, a plan gate, and a gate-before-stop for Claude Code sessions. Every file edit happens on a branch, the branch is only merged once the repository's own gates pass, and sensitive paths need a written plan first.",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "author": {
     "name": "Khanh"
   },
@@ -14,6 +14,11 @@
             "type": "command",
             "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/auto-worktree.sh\"",
             "timeout": 5
+          },
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/check-content-rules.sh\"",
+            "timeout": 15
           },
           {
             "type": "command",

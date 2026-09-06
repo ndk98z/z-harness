@@ -604,6 +604,119 @@ rm -rf "$(dirname "$DIRTY")"
 
 rm -rf "$(dirname "$STOPREPO")"
 
+# --- 11. content rules --------------------------------------------------------------------------
+# The mechanism a repository declares its own rules through. None of the rules below mean anything
+# outside this fixture, which is the point: the plugin supplies the reading, never the rule.
+
+# Not under mktemp's directory, and that is load-bearing rather than fussy. The write detector treats
+# /tmp, /private/tmp and /var/folders as scratch space and exempts them, so a fixture living there
+# makes every shell-command case pass for the wrong reason — the rule never runs at all.
+RULES="${HOME}/.cache/z-harness-tests/rules-$$"
+rm -rf "$RULES"
+mkdir -p "$RULES/.claude/state" "$RULES/src/edge" "$RULES/src/ui"
+git -C "$RULES" init -q
+cat > "$RULES/.claude/harness.json" <<'JSON'
+{
+  "contentRules": [
+    { "match": "^src/edge/",
+      "forbid": "Cache-Control:[^\"]*immutable",
+      "why": "HTML must never be immutable; a browser cannot purge it." },
+    { "match": "^src/edge/robots\\.ts$",
+      "require": "X-Robots-Tag",
+      "why": "The default subdomain must stay noindex." }
+  ]
+}
+JSON
+
+# Runs the hook against one payload and prints its exit code.
+rules_exit() {
+  printf '%s' "$1" | CLAUDE_HARNESS_HOOK_LOG="$RULES/.git/log.jsonl" CLAUDE_PROJECT_DIR="$RULES" \
+    bash "$ROOT/hooks/check-content-rules.sh" > /dev/null 2>&1
+  printf '%s' "$?"
+}
+
+# Builds an Edit payload: $1 repo-relative path, $2 old text, $3 new text.
+rules_edit() {
+  jq -nc --arg f "$RULES/$1" --arg o "$2" --arg n "$3" \
+    '{tool_name:"Edit", session_id:"rulestest", tool_input:{file_path:$f, old_string:$o, new_string:$n}}'
+}
+
+# Nothing declared, nothing checked.
+NOCONF=$(mktemp -d)
+mkdir -p "$NOCONF/.claude"
+expect_eq "0" "$(printf '%s' "$(jq -nc --arg f "$NOCONF/src/x.ts" \
+  '{tool_name:"Write", session_id:"r", tool_input:{file_path:$f, content:"Cache-Control: immutable"}}')" \
+  | CLAUDE_PROJECT_DIR="$NOCONF" bash "$ROOT/hooks/check-content-rules.sh" > /dev/null 2>&1; printf '%s' "$?")" \
+  "content: no rules declared means nothing is checked"
+rm -rf "$NOCONF"
+
+# forbid, and the path scoping that keeps it from applying everywhere.
+expect_eq "2" "$(rules_exit "$(rules_edit src/edge/headers.ts 'a' 'Cache-Control: public, immutable')")" \
+  "content: a forbidden pattern in a ruled path is refused"
+expect_eq "0" "$(rules_exit "$(rules_edit src/edge/headers.ts 'a' 'Cache-Control: public, max-age=60')")" \
+  "content: an allowed value in the same file passes"
+expect_eq "0" "$(rules_exit "$(rules_edit src/ui/button.tsx 'a' 'Cache-Control: public, immutable')")" \
+  "content: the same text outside the ruled path is not the rule's business"
+
+# require, which is about removal rather than absence. Asking whether the new text contains the
+# pattern would refuse every edit to every other line of the file.
+expect_eq "2" "$(rules_exit "$(rules_edit src/edge/robots.ts 'X-Robots-Tag: noindex' 'nothing here')")" \
+  "content: an edit that removes required text is refused"
+expect_eq "0" "$(rules_exit "$(rules_edit src/edge/robots.ts 'X-Robots-Tag: noindex' 'X-Robots-Tag: noindex, nofollow')")" \
+  "content: keeping the required text passes"
+expect_eq "0" "$(rules_exit "$(rules_edit src/edge/robots.ts 'const port = 1' 'const port = 2')")" \
+  "content: an edit elsewhere in the file is not a removal"
+
+# The deletion shape. An Edit whose replacement is empty produces no new text at all, and every check
+# phrased as "what does the new text say" is blind to it — which is how a guarantee was removed
+# upstream without any rule seeing it.
+expect_eq "2" "$(rules_exit "$(rules_edit src/edge/robots.ts 'X-Robots-Tag: noindex' '')")" \
+  "content: deleting the required line is refused"
+
+# A shell command is refused on the strength of the path, because the bytes are not readable here.
+SHELL_PAYLOAD=$(jq -nc --arg c "cat > $RULES/src/edge/headers.ts <<EOF" \
+  '{tool_name:"Bash", session_id:"rulestest", tool_input:{command:$c}}')
+expect_eq "2" "$(rules_exit "$SHELL_PAYLOAD")" "content: a shell write to a ruled path is refused"
+SHELL_OK=$(jq -nc --arg c "cat > $RULES/src/ui/button.tsx <<EOF" \
+  '{tool_name:"Bash", session_id:"rulestest", tool_input:{command:$c}}')
+expect_eq "0" "$(rules_exit "$SHELL_OK")" "content: a shell write elsewhere is not refused"
+SHELL_READ=$(jq -nc --arg c "grep -rn immutable $RULES/src/edge" \
+  '{tool_name:"Bash", session_id:"rulestest", tool_input:{command:$c}}')
+expect_eq "0" "$(rules_exit "$SHELL_READ")" "content: reading a ruled path is not writing to it"
+
+# Reads are never the rules' business, whatever they carry.
+READ_PAYLOAD=$(jq -nc --arg f "$RULES/src/edge/headers.ts" \
+  '{tool_name:"Read", session_id:"rulestest", tool_input:{file_path:$f}}')
+expect_eq "0" "$(rules_exit "$READ_PAYLOAD")" "content: a read is not a write"
+
+# A write inside a worktree is the same file as far as the rules are concerned. Without the prefix
+# strip this would miss every edit, since every edit is supposed to happen in one.
+WT_EDIT=$(jq -nc --arg f "$RULES/.claude/worktrees/feature/src/edge/headers.ts" \
+  '{tool_name:"Edit", session_id:"rulestest", tool_input:{file_path:$f, old_string:"a", new_string:"Cache-Control: immutable"}}')
+expect_eq "2" "$(rules_exit "$WT_EDIT")" "content: a worktree path is still the ruled path"
+
+# The declared escape hatch, and its expiry. It exists because the rule and the test proving the rule
+# is alive point at each other: breaking a rule on purpose is how you learn the test still catches it.
+BREAKING=$(rules_edit src/edge/headers.ts 'a' 'Cache-Control: public, immutable')
+printf 'Mutating the immutable rule to confirm the suite still catches it.\n' \
+  > "$RULES/.claude/state/mutation-rulestest.md"
+expect_eq "0" "$(rules_exit "$BREAKING")" "content: a declared mutation is allowed through"
+expect_eq "2" "$(printf '%s' "$(rules_edit src/edge/headers.ts 'a' 'Cache-Control: public, immutable' \
+  | jq -c '.session_id = "someone_else"')" | CLAUDE_HARNESS_HOOK_LOG="$RULES/.git/log.jsonl" \
+  CLAUDE_PROJECT_DIR="$RULES" bash "$ROOT/hooks/check-content-rules.sh" > /dev/null 2>&1; printf '%s' "$?")" \
+  "content: the escape hatch belongs to one session only"
+# Backdated past the window: the door closes on its own, so a declaration made once does not disarm
+# the rules for the rest of the session.
+touch -t 202001010000 "$RULES/.claude/state/mutation-rulestest.md"
+expect_eq "2" "$(rules_exit "$BREAKING")" "content: an expired mutation declaration stops working"
+rm -f "$RULES/.claude/state/mutation-rulestest.md"
+
+# An empty declaration is not a declaration.
+: > "$RULES/.claude/state/mutation-rulestest.md"
+expect_eq "2" "$(rules_exit "$BREAKING")" "content: an empty mutation file does not open the door"
+
+rm -rf "$RULES"
+
 printf '\nhooks: %d passed' "$PASS"
 if [[ $FAIL -gt 0 ]]; then printf ', %d FAILED\n' "$FAIL"; exit 1; fi
 printf '\n'

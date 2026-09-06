@@ -43,6 +43,10 @@ jq -s 'group_by(.reason) | map({(.[0].reason): length}) | add' \
 Logging the allows is the point. Without a denominator, a false-refusal rate is not computable, and
 the write detector in here had its patterns tuned twice by guesswork for exactly that reason.
 
+**Content rules** (`check-content-rules.sh`, `PreToolUse`). Compares the text a call is about to
+write against rules the repository declared, and refuses the write when one is broken. See
+[Content rules](#content-rules).
+
 **Conventions** (`check-conventions.sh`, `PostToolUse`). Reads the file the session just wrote and
 reports what the repository's own rules say is missing: a doc comment on every declaration, and no
 line matching a pattern the repository forbids. Runs after the write, so nothing is undone — the
@@ -149,6 +153,45 @@ at `.claude/state/plan-<session>.md` first — at least three lines: what change
 near, how it will be verified.
 ```
 
+## Content rules
+
+The mechanism a repository states its own invariants through. None of the rules ship with the
+plugin — it supplies the reading, never the rule:
+
+```json
+{
+  "contentRules": [
+    { "match": "^src/edge/",
+      "forbid": "Cache-Control:[^\"]*immutable",
+      "why": "HTML must never be immutable; a browser cannot purge it." },
+    { "match": "^src/edge/robots\\.ts$",
+      "require": "X-Robots-Tag",
+      "why": "The default subdomain must stay noindex." }
+  ]
+}
+```
+
+`match` is an extended regular expression over the repository-relative path, with any worktree prefix
+stripped — every edit happens in a worktree, so without that strip no rule would ever match anything.
+
+`forbid` refuses when the text being written matches it. `require` refuses when the text being
+*replaced* matched and the replacement does not: it catches removal, not absence. That distinction is
+the reason this hook reads `old_string` at all. Every check phrased as "what does the new text say"
+is blind to a deletion, because deleting produces no new text — and that was the one edit shape that
+could remove a guarantee upstream without any rule seeing it.
+
+**Shell commands that write a ruled path are refused, not inspected.** A redirect does not carry its
+bytes anywhere the hook can read them, and a check that cannot run must not report that it passed —
+upstream, a heredoc walked straight past the rule that had just refused the identical change as an
+Edit. The refusal says to use Edit or Write instead.
+
+**Declared mutation.** Writing `.claude/state/mutation-<session>.md` with at least one line of reason
+lets that session's writes through for thirty minutes, logged under its own reason code rather than
+as an ordinary allow. It exists because a rule and the test proving that rule is still alive point at
+each other: breaking a rule on purpose is how you find out the test still catches it, and without a
+door that is the one thing the rule makes impossible. The window expires on its own, an empty file
+does not count, and it belongs to one session.
+
 ## Gates
 
 `verify-before-stop.sh` is a frame with no commands of its own. What runs comes from
@@ -197,11 +240,6 @@ operation is idempotent. A gate that cannot observe its own condition must not b
 is what makes the condition observable. Keyed to HEAD, so committing again invalidates it: that is a
 different diff. Stated limit — an agent that writes the file without reading anything passes. This
 guards against forgetting, not against intent.
-
-## Not yet here
-
-- **No content rules.** The upstream `check-invariants.sh` compares text about to be written against
-  a table of product rules. The mechanism generalises; the rules do not, so neither ships here yet.
 
 ## Tests
 
