@@ -1,0 +1,27 @@
+{
+  "name": "claude-harness",
+  "description": "Worktree isolation and a plan gate for Claude Code sessions. Every file edit happens on a branch, and edits to paths the repository calls sensitive need a written plan first.",
+  "version": "0.1.0",
+  "author": {
+    "name": "Khanh"
+  },
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/auto-worktree.sh\"",
+            "timeout": 5
+          },
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/require-plan.sh\"",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  }
+}

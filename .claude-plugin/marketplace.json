@@ -1,0 +1,16 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "claude-harness",
+  "description": "Reusable Claude Code guardrails extracted from a production repository: worktree isolation, a plan gate, and a decision log.",
+  "owner": {
+    "name": "Khanh"
+  },
+  "plugins": [
+    {
+      "name": "claude-harness",
+      "description": "Worktree isolation and a plan gate for Claude Code sessions.",
+      "source": "./",
+      "category": "workflow"
+    }
+  ]
+}
