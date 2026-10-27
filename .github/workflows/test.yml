@@ -25,7 +25,7 @@ jobs:
             os: macos-latest
             bash32: true
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       # The suite and the hooks it drives are started with `bash …` and `#!/usr/bin/env bash`, which
       # both resolve through PATH. A directory in front of PATH whose `bash` is /bin/bash makes all of
