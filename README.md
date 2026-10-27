@@ -1,12 +1,16 @@
 # z-harness
 
-Worktree isolation and a plan gate for Claude Code sessions, packaged as a plugin.
+[![test](https://github.com/ndk98z/z-harness/actions/workflows/test.yml/badge.svg)](https://github.com/ndk98z/z-harness/actions/workflows/test.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+
+Worktree isolation, a plan gate, a gate-before-stop and a push guard for Claude Code sessions,
+packaged as a plugin.
 
 Extracted from a production repository where every guard in here was written after the bug it now
 catches. It carries the mechanisms, not that project's rules: what counts as a sensitive path is
 declared by the repository you install it into.
 
-Requires `git`, `bash`, and `jq`.
+Requires `git` (2.28 or later), `bash` (3.2 or later, so the stock macOS shell works) and `jq`.
 
 ## What it does
 
@@ -98,12 +102,31 @@ branch checked out where the command runs. A destination it cannot read from the
 
 ## Install
 
-From a local directory, which is enough to try it and needs no remote:
+From GitHub, inside Claude Code:
 
 ```
-/plugin marketplace add /absolute/path/to/z-harness
+/plugin marketplace add ndk98z/z-harness
 /plugin install z-harness@z-harness
 ```
+
+or from a terminal:
+
+```bash
+claude plugin marketplace add ndk98z/z-harness
+claude plugin install z-harness@z-harness
+```
+
+To try a local checkout instead, for instance while working on the plugin, pass its absolute path to
+`marketplace add`.
+
+An installed copy is cached by version. To pick up a new release:
+
+```bash
+claude plugin marketplace update z-harness
+claude plugin update z-harness@z-harness
+```
+
+Release notes are in [CHANGELOG.md](CHANGELOG.md).
 
 ## Configure the repository
 
@@ -337,3 +360,14 @@ everything, both turn it red. So do reverting each fix ported from upstream — 
 gate baseline, the worktree root found from a subdirectory, the worktree-prefix strip, the write
 detector's variables and multi-line quotes, the here-string that survives text over 64 KiB, and the
 push guard's protected-branch check.
+
+## Contributing
+
+Bug reports, especially false refusals, are the most useful thing you can send. See
+[CONTRIBUTING.md](CONTRIBUTING.md) for how the suite works and what a change has to keep, and
+[SECURITY.md](SECURITY.md) for a way past a guard that should be reported privately. Everyone taking
+part agrees to the [Code of Conduct](CODE_OF_CONDUCT.md).
+
+## License
+
+[MIT](LICENSE)

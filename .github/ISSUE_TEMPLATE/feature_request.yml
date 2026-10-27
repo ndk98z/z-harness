@@ -1,0 +1,37 @@
+name: Feature or new guard
+description: Propose a new hook, a new configuration key, or a change to what an existing hook does.
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Every guard adds friction to every repository that installs this plugin, so a proposal is
+        judged mostly by the mistake it prevents. The plugin ships mechanisms, not any one project's
+        rules: anything specific to a repository should be a key in `.claude/harness.json`.
+  - type: textarea
+    id: problem
+    attributes:
+      label: The mistake it prevents
+      description: What went wrong, or nearly went wrong, in a real session. A concrete incident beats a hypothetical one.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What the hook should do
+      description: What it should block or allow, and what it should say when it blocks.
+    validations:
+      required: true
+  - type: textarea
+    id: false-refusals
+    attributes:
+      label: What it must not block
+      description: The nearest commands or edits that look similar but are fine. These become the false-refusal tests.
+    validations:
+      required: true
+  - type: textarea
+    id: config
+    attributes:
+      label: Configuration
+      description: Any new `.claude/harness.json` keys, and what happens when they are absent.
+      render: json

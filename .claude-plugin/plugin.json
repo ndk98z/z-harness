@@ -1,10 +1,20 @@
 {
   "name": "z-harness",
   "description": "Worktree isolation, a plan gate, a gate-before-stop and a push guard for Claude Code sessions. Every file edit happens on a branch, the branch is only merged once the repository's own gates pass, sensitive paths need a written plan first, and the publish branch is never pushed or merged into by a session.",
-  "version": "0.6.0",
+  "version": "0.6.1",
   "author": {
     "name": "Khanh"
   },
+  "homepage": "https://github.com/ndk98z/z-harness",
+  "repository": "https://github.com/ndk98z/z-harness",
+  "license": "MIT",
+  "keywords": [
+    "hooks",
+    "worktree",
+    "guardrails",
+    "git",
+    "stop-hook"
+  ],
   "hooks": {
     "PreToolUse": [
       {

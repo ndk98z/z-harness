@@ -65,6 +65,11 @@ bash_write_is_read_only_tool() {
   return 1
 }
 
+# True when a write target needs no worktree: scratch space, build output, session state, or a path
+# outside the repository.
+#
+# $1 target path; a relative one is judged by its name alone and is never "outside the repository"
+# $2 repository root (default: $PWD)
 bash_write_is_exempt() {
   local target="$1" repo="${2:-$PWD}"
   repo="${repo%/}"
@@ -256,7 +261,8 @@ bash_write_targets() {
       local -a words=()
       # `read -a` rather than an unquoted `$segment`, which would glob `X=*.png` against the cwd.
       read -ra words <<< "$segment"
-      for word in "${words[@]}"; do
+      # The `${a[@]+…}` form because macOS /bin/bash 3.2 calls an empty array unbound under `set -u`.
+      for word in ${words[@]+"${words[@]}"}; do
         [[ "$word" == *=* ]] || continue
         name="${word%%=*}"
         val="${word#*=}"
@@ -476,7 +482,7 @@ bash_write_clobbers_linked_deps() {
     esac
 
     local dir resolved dir_own
-    for dir in "${dirs[@]}"; do
+    for dir in ${dirs[@]+"${dirs[@]}"}; do
       dir="${dir%/}"
       # Only a symlink can reach out of this tree. A real directory here is the main tree's own, and
       # rebuilding that is the documented way to fix it.
