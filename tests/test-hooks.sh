@@ -142,6 +142,16 @@ expect_true "worktree edit to a sensitive path is still gated" \
 expect_false "worktree edit to an ordinary path is still not gated" \
   path_is_invariant_code "$CONF/.claude/worktrees/feature/src/ui/button.tsx" "$CONF"
 
+# A worktree path under a root other than the one passed — which is what every hook sees when
+# CLAUDE_PROJECT_DIR is unset. The fallback strip used to be `##*/.claude/worktrees/*/`, whose trailing
+# `*` matches slashes, so it left a bare file name and every rule, the plan gate and the review receipt
+# missed the edit.
+expect_eq "src/billing/charge.ts" \
+  "$(sensitive_relpath "/elsewhere/repo/.claude/worktrees/feature/src/billing/charge.ts" "$CONF")" \
+  "relpath: a worktree under another root keeps its directories"
+expect_true "worktree path under another root is still gated" \
+  path_needs_plan "/elsewhere/repo/.claude/worktrees/feature/src/billing/charge.ts" "$CONF"
+
 # --- 5. log location -----------------------------------------------------------------------------
 # The log must never land in a working tree: a file there shows up in git status for every worktree
 # and makes the merge refuse.
@@ -250,6 +260,29 @@ expect_write allow "receipt via heredoc"            'cat > .claude/state/review-
 expect_write flag  "CI config is not state"         'echo x > .github/workflows/ci.yml'
 expect_write flag  "the hooks are not state"        'echo x > .claude/hooks/guard.sh'
 
+# A variable assigned a literal path earlier in the same command is that path. Upstream a session that
+# wrote only to its scratchpad was refused four times for `X=/tmp/s; cp a $X/b`. Each allow is paired
+# with the flag that keeps it honest.
+expect_write allow "cp into a literal-assigned scratch var" 'X=/private/tmp/scratch; cp a.png $X/out.png'
+expect_write allow "sed -i through \${VAR}"                  "X=/tmp/s && sed -i '' s/a/b/ \${X}/video.html"
+expect_write allow "export then redirect"                   'export OUT=/tmp/o; echo hi > $OUT/log.txt'
+expect_write flag  "var assigned a source dir"              'X=src; cp /tmp/a $X/index.ts'
+expect_write flag  "unknown var stays strict"               'cp /tmp/a $NOWHERE/index.ts'
+expect_write flag  "var assigned from a substitution"       'X=$(pwd); cp /tmp/a $X/src/index.ts'
+expect_write flag  "reassigned to something unreadable"     'X=/tmp; X=$HOME/x; cp /tmp/a $X/index.ts'
+
+# A single-quoted script spanning lines is still one argument. The quote state used to reset on every
+# line, so `x=>x.ok` in a multi-line `node -e` read as a redirect into a file called `x.ok`.
+MULTILINE_NODE=$(printf "node -e '\nconst f = a.filter(x=>x.ok).map((y)=>y.id);\nconsole.log(f)\n' /tmp/in")
+expect_write allow "multi-line node -e with arrows"         "$MULTILINE_NODE"
+MULTILINE_NODE_REDIRECT=$(printf "node -e '\nconsole.log(1)\n' > src/x.ts")
+expect_write flag  "multi-line node -e, real redirect"      "$MULTILINE_NODE_REDIRECT"
+# Carrying quote state across lines makes an apostrophe in a comment dangerous: unclosed, it would
+# blank every line after it. Comments are dropped, so the write below the comment is still seen.
+COMMENT_APOSTROPHE=$(printf "# don't panic\necho hi > src/x.ts")
+expect_write flag  "apostrophe in a comment hides nothing"  "$COMMENT_APOSTROPHE"
+expect_write allow "hash inside a word is not a comment"    'echo a#b > /tmp/x'
+
 # --- 7. the npm ci remedy ------------------------------------------------------------------------
 # Generated from worktree.symlinkDirectories rather than written out, because a hand-written list
 # stops being true the day a directory is added. Advice with a missing argument is worse than none:
@@ -284,7 +317,7 @@ mkdir -p "$CONV/.claude" "$CONV/src" "$CONV/test" "$CONV/generated"
 conv_exit() {
   local file="$1" tool="${2:-Write}"
   printf '{"tool_name":"%s","session_id":"convtest","tool_input":{"file_path":"%s"}}' "$tool" "$file" \
-    | CLAUDE_HARNESS_HOOK_LOG="$CONV/log.jsonl" CLAUDE_PROJECT_DIR="$CONV" \
+    | Z_HARNESS_HOOK_LOG="$CONV/log.jsonl" CLAUDE_PROJECT_DIR="$CONV" \
       bash "$ROOT/hooks/check-conventions.sh" > /dev/null 2>&1
   printf '%s' "$?"
 }
@@ -369,6 +402,9 @@ printf 'x\n' > "$STOPREPO/README"
 printf '.claude/worktrees/\n.claude/state/\n' > "$STOPREPO/.gitignore"
 git -C "$STOPREPO" add -A
 git -C "$STOPREPO" commit -qm init
+# The main tree sits on an integration branch, which is what the automatic merge advances. The
+# default branch stays behind and is never merged into by a stop — section 13 covers that refusal.
+git -C "$STOPREPO" checkout -q -b integration
 
 # Runs the stop hook against the fixture and prints "<exit>|<stderr on one line>".
 #
@@ -376,7 +412,7 @@ git -C "$STOPREPO" commit -qm init
 stop_run() {
   local cwd="$1" active="${2:-false}" out status
   out=$(printf '{"session_id":"stoptest","stop_hook_active":%s,"cwd":"%s"}' "$active" "$cwd" \
-    | CLAUDE_HARNESS_HOOK_LOG="$STOPREPO/.git/log.jsonl" CLAUDE_PROJECT_DIR="$STOPREPO" \
+    | Z_HARNESS_HOOK_LOG="$STOPREPO/.git/log.jsonl" CLAUDE_PROJECT_DIR="$STOPREPO" \
       bash "$ROOT/hooks/verify-before-stop.sh" 2>&1)
   status=$?
   printf '%s|%s' "$status" "$(printf '%s' "$out" | tr '\n' ' ')"
@@ -556,7 +592,7 @@ git -C "$BRANCHED/.claude/worktrees/w" commit -qm "committed work"
 
 branched_run() {
   printf '{"session_id":"branched","stop_hook_active":false,"cwd":"%s"}' "$BRANCHED/.claude/worktrees/w" \
-    | CLAUDE_HARNESS_HOOK_LOG="$BRANCHED/.git/log.jsonl" CLAUDE_PROJECT_DIR="$BRANCHED" \
+    | Z_HARNESS_HOOK_LOG="$BRANCHED/.git/log.jsonl" CLAUDE_PROJECT_DIR="$BRANCHED" \
       bash "$ROOT/hooks/verify-before-stop.sh" > /dev/null 2>&1
   printf '%s' "$?"
 }
@@ -578,6 +614,7 @@ git -C "$DIRTY" config user.email t@t
 printf 'x\n' > "$DIRTY/README"
 git -C "$DIRTY" add -A
 git -C "$DIRTY" commit -qm init
+git -C "$DIRTY" checkout -q -b integration
 git -C "$DIRTY" worktree add -q -b worktree-dirty "$DIRTY/.claude/worktrees/dirty" > /dev/null 2>&1
 printf 'work\n' > "$DIRTY/.claude/worktrees/dirty/thing.ts"
 git -C "$DIRTY/.claude/worktrees/dirty" add -A
@@ -630,7 +667,7 @@ JSON
 
 # Runs the hook against one payload and prints its exit code.
 rules_exit() {
-  printf '%s' "$1" | CLAUDE_HARNESS_HOOK_LOG="$RULES/.git/log.jsonl" CLAUDE_PROJECT_DIR="$RULES" \
+  printf '%s' "$1" | Z_HARNESS_HOOK_LOG="$RULES/.git/log.jsonl" CLAUDE_PROJECT_DIR="$RULES" \
     bash "$ROOT/hooks/check-content-rules.sh" > /dev/null 2>&1
   printf '%s' "$?"
 }
@@ -702,7 +739,7 @@ printf 'Mutating the immutable rule to confirm the suite still catches it.\n' \
   > "$RULES/.claude/state/mutation-rulestest.md"
 expect_eq "0" "$(rules_exit "$BREAKING")" "content: a declared mutation is allowed through"
 expect_eq "2" "$(printf '%s' "$(rules_edit src/edge/headers.ts 'a' 'Cache-Control: public, immutable' \
-  | jq -c '.session_id = "someone_else"')" | CLAUDE_HARNESS_HOOK_LOG="$RULES/.git/log.jsonl" \
+  | jq -c '.session_id = "someone_else"')" | Z_HARNESS_HOOK_LOG="$RULES/.git/log.jsonl" \
   CLAUDE_PROJECT_DIR="$RULES" bash "$ROOT/hooks/check-content-rules.sh" > /dev/null 2>&1; printf '%s' "$?")" \
   "content: the escape hatch belongs to one session only"
 # Backdated past the window: the door closes on its own, so a declaration made once does not disarm
@@ -714,6 +751,27 @@ rm -f "$RULES/.claude/state/mutation-rulestest.md"
 # An empty declaration is not a declaration.
 : > "$RULES/.claude/state/mutation-rulestest.md"
 expect_eq "2" "$(rules_exit "$BREAKING")" "content: an empty mutation file does not open the door"
+rm -f "$RULES/.claude/state/mutation-rulestest.md"
+
+# Text larger than a pipe buffer. `printf | grep -q` under pipefail reads a match as no match once the
+# writer takes SIGPIPE, which past 64 KiB is every time the match comes early — so the decisive text
+# goes first and about 200 KB of padding after it.
+#
+# The content reaches jq on stdin rather than as --arg: Linux caps one argv string at 128 KiB, jq then
+# dies with "Argument list too long", and an empty payload passes as whatever the hook does with one.
+# Upstream that made a refusal case green while checking nothing.
+#
+# $1 repo-relative path, $2 text placed before the padding
+rules_big_write() {
+  { printf '%s\n' "$2"; head -c 200000 /dev/zero | tr '\0' 'x'; printf '\n'; } |
+    jq -Rsc --arg f "$RULES/$1" \
+      '{tool_name:"Write", session_id:"rulestest", tool_input:{file_path:$f, content:.}}'
+}
+BIG_BAD=$(rules_big_write src/edge/headers.ts 'Cache-Control: public, immutable')
+BIG_OK=$(rules_big_write src/edge/headers.ts 'Cache-Control: public, max-age=60')
+expect_true "content: the large payload was built" test "${#BIG_BAD}" -gt 150000
+expect_eq "2" "$(rules_exit "$BIG_BAD")" "content: a forbidden pattern in a file over 64 KiB is refused"
+expect_eq "0" "$(rules_exit "$BIG_OK")" "content: a compliant file over 64 KiB is allowed"
 
 rm -rf "$RULES"
 
@@ -739,6 +797,283 @@ for agent in "$ROOT"/agents/*.md; do
   expect_false "agent is read-only: $name" \
     bash -c 'awk "/^---$/{n++; next} n==1" "$1" | grep -E "^tools:" | grep -qE "(Edit|Write|NotebookEdit)"' _ "$agent"
 done
+
+# --- 13. the two branches: where a worktree merges, and what the repository publishes from --------
+# One function used to answer both questions. The merge target is what `git merge --ff-only` in the
+# main tree advances — the branch checked out there — and the publish branch is a different branch
+# whenever the main tree is on a feature branch. Every message, refusal and gate baseline named the
+# wrong one of the two, and on a repository sitting on its default branch the stop fast-forwarded it
+# silently.
+
+# shellcheck source=/dev/null
+source "$ROOT/hooks/lib-main-branch.sh"
+
+# Prints the default branch of a fresh repository whose only branch is $1.
+fresh_default() {
+  local repo got
+  repo=$(mktemp -d)
+  git -C "$repo" init -q -b "$1"
+  git -C "$repo" -c user.email=t@t -c user.name=t commit -q --allow-empty -m init
+  got=$(default_branch_name "$repo")
+  rm -rf "$repo"
+  printf '%s' "$got"
+}
+expect_eq "main"   "$(fresh_default main)"   "branches: a repository on main publishes from main"
+expect_eq "master" "$(fresh_default master)" "branches: a repository on master publishes from master"
+# Neither main nor master and no origin/HEAD: the last resort is the main tree's own branch, so a
+# single-branch repository still has a protected branch rather than none.
+expect_eq "trunk"  "$(fresh_default trunk)"  "branches: a repository on trunk publishes from trunk"
+
+# The remote's own idea of default wins over a local main, and need not exist locally.
+BR=$(mktemp -d)
+git -C "$BR" init -q -b main
+git -C "$BR" -c user.email=t@t -c user.name=t commit -q --allow-empty -m init
+git -C "$BR" remote add origin https://example.invalid/r.git
+git -C "$BR" symbolic-ref refs/remotes/origin/HEAD refs/remotes/origin/release
+expect_eq "release" "$(default_branch_name "$BR")" "branches: origin/HEAD names the publish branch"
+
+# The pair the old function could not tell apart. If these came out equal, the protected-branch
+# refusal would refuse every merge.
+git -C "$BR" checkout -q -b integration
+expect_eq "integration" "$(target_branch_name "$BR")" "branches: the target is what the main tree has checked out"
+WTB="$BR/.claude/worktrees/w"
+git -C "$BR" worktree add -q -b worktree-w "$WTB" > /dev/null 2>&1
+expect_eq "integration" "$(target_branch_name "$WTB")" \
+  "branches: asked from inside a worktree, the target is still the main tree's branch"
+git -C "$BR" checkout -q --detach
+expect_eq "" "$(target_branch_name "$BR")" "branches: a detached main tree has no target"
+rm -rf "$BR"
+
+# No hook may go back to hardcoding either branch.
+expect_eq "" "$(grep -nE 'merge-base[[:space:]]+main\b|(MAIN|TARGET|DEFAULT)_BRANCH=("|'"'"')?(main|master)\b' \
+  "$ROOT"/hooks/verify-before-stop.sh "$ROOT"/hooks/merge-worktree.sh)" "branches: no branch name is hardcoded"
+
+# --- 14. merge-worktree, case by case ------------------------------------------------------------
+# `pwd -P` on the temporary directory is load-bearing: on macOS mktemp returns /var/... while git
+# reports /private/var/..., and a prefix test between the two silently answers no.
+#
+# The fixture has an origin/HEAD naming main, and that is load-bearing too: without it the old code
+# fell through to the branch checked out in the main tree, which is the right answer by accident, so
+# every case passed against the code that had the bug.
+#
+# $1 the branch to leave checked out in the main tree (default: integration). Prints "<repo> <wt>".
+mw_setup() {
+  local target="${1:-integration}" repo wt
+  repo=$(mktemp -d)
+  repo=$(cd "$repo" && pwd -P)
+  git -C "$repo" init -q -b main
+  mkdir -p "$repo/.claude"
+  printf '.claude/worktrees/\n.claude/state/\n' > "$repo/.gitignore"
+  printf 'x\n' > "$repo/keep.txt"
+  git -C "$repo" add -A
+  git -C "$repo" -c user.email=t@t -c user.name=t commit -q -m init
+  git -C "$repo" remote add origin https://example.invalid/r.git
+  git -C "$repo" symbolic-ref refs/remotes/origin/HEAD refs/remotes/origin/main
+  [[ "$target" == "main" ]] || git -C "$repo" checkout -q -b "$target"
+  wt="$repo/.claude/worktrees/w"
+  git -C "$repo" worktree add -q -b worktree-w "$wt" "$target" > /dev/null 2>&1
+  printf 'x\n' > "$wt/file.txt"
+  git -C "$wt" add file.txt
+  git -C "$wt" -c user.email=t@t -c user.name=t commit -q -m work
+  printf '%s %s' "$repo" "$wt"
+}
+
+# Prints "<exit>|<target moved: yes/no>|<output on one line>" for one merge.
+#
+# $1 repo, $2 worktree, $3 session cwd, $4 target branch (default: integration)
+mw_run() {
+  local repo="$1" wt="$2" cwd="$3" target="${4:-integration}" sha out status moved=no
+  sha=$(git -C "$wt" rev-parse HEAD)
+  out=$( cd "$repo" && bash "$ROOT/hooks/merge-worktree.sh" "$wt" "$cwd" 2>&1 )
+  status=$?
+  [[ "$(git -C "$repo" rev-parse "$target" 2>/dev/null)" == "$sha" ]] && moved=yes
+  printf '%s|%s|%s' "$status" "$moved" "$(printf '%s' "$out" | tr '\n' ' ')"
+}
+
+read -r MW_REPO MW_WT <<< "$(mw_setup)"
+R=$(mw_run "$MW_REPO" "$MW_WT" "$MW_REPO")
+expect_eq "0|yes" "${R%|*}" "merge: a clean branch fast-forwards the branch it was cut from"
+expect_false "merge: a merged worktree the session has left is removed" test -d "$MW_WT"
+rm -rf "$MW_REPO"
+
+read -r MW_REPO MW_WT <<< "$(mw_setup)"
+printf 'uncommitted\n' > "$MW_WT/dirty.txt"
+R=$(mw_run "$MW_REPO" "$MW_WT" "$MW_REPO")
+expect_eq "2|no" "${R%|*}" "merge: a dirty worktree is refused"
+rm -rf "$MW_REPO"
+
+# Diverged, asserted on the target — the direction the old code got wrong. It compared against the
+# publish branch, which was still an ancestor here, so `git merge --ff-only` failed later with git's
+# own wording and the message naming the rebase never printed.
+read -r MW_REPO MW_WT <<< "$(mw_setup)"
+git -C "$MW_REPO" -c user.email=t@t -c user.name=t commit -q --allow-empty -m "meanwhile, on the target"
+R=$(mw_run "$MW_REPO" "$MW_WT" "$MW_REPO")
+expect_eq "2|no" "${R%|*}" "merge: a diverged branch is refused"
+case "$R" in *"rebase integration"*) check ok "merge: a divergence names the rebase onto the target" ;;
+  *) check no "merge: a divergence names the rebase onto the target" ;; esac
+rm -rf "$MW_REPO"
+
+# The publish branch is not advanced by a session stopping. Exit 0, not 2: the session cannot fix this
+# by editing code, and a non-zero exit would spend the stop hook's three-stop budget only to release
+# with the same news. The worktree survives, since its commits are the only copy of the work.
+read -r MW_REPO MW_WT <<< "$(mw_setup main)"
+R=$(mw_run "$MW_REPO" "$MW_WT" "$MW_REPO" main)
+expect_eq "0|no" "${R%|*}" "merge: the publish branch is not merged into automatically"
+expect_true "merge: the refused worktree is kept" test -d "$MW_WT"
+case "$R" in *"merge --ff-only worktree-w"*) check ok "merge: the refusal prints the command to run" ;;
+  *) check no "merge: the refusal prints the command to run" ;; esac
+
+# Opted in: the same repository, told in harness.json that its default branch may be merged into.
+printf '%s' '{"merge":{"intoDefaultBranch":true}}' > "$MW_REPO/.claude/harness.json"
+R=$(mw_run "$MW_REPO" "$MW_WT" "$MW_REPO" main)
+expect_eq "0|yes" "${R%|*}" "merge: a repository that opts in has its default branch merged into"
+rm -rf "$MW_REPO"
+
+# A detached main tree has nothing to fast-forward, and it is not the session's work that is wrong.
+read -r MW_REPO MW_WT <<< "$(mw_setup)"
+git -C "$MW_REPO" checkout -q --detach
+R=$(mw_run "$MW_REPO" "$MW_WT" "$MW_REPO")
+expect_eq "0|no" "${R%|*}" "merge: a detached main tree is said, not merged and not blocked"
+rm -rf "$MW_REPO"
+
+# The session standing inside the worktree: the merge happens and the directory stays. Removing it
+# deleted a session's cwd out from under it upstream, twice.
+read -r MW_REPO MW_WT <<< "$(mw_setup)"
+R=$(mw_run "$MW_REPO" "$MW_WT" "$MW_WT")
+expect_eq "0|yes" "${R%|*}" "merge: the session's own worktree still merges"
+expect_true "merge: the worktree the session stands in is never removed" test -d "$MW_WT"
+rm -rf "$MW_REPO"
+
+# --- 15. the stop gate's baseline, and the worktree found from a subdirectory --------------------
+# The baseline is the branch the worktree was cut from. Against the publish branch, a worktree cut from
+# a long-lived feature branch was measured across the entire feature: upstream, 73 files and four gates
+# on every stop, for a diff whose own contents were empty. Both directions, because the failure modes
+# are opposite and a fix for one is the other's bug.
+#
+# $1 expected exit, $2 case name, $3 path committed on the target, $4 path committed in the worktree,
+# $5 cwd below the worktree root the session stops from (optional)
+baseline_case() {
+  local want="$1" name="$2" on_target="$3" in_worktree="$4" sub="${5:-}" repo wt got
+  repo=$(mktemp -d)
+  repo=$(cd "$repo" && pwd -P)
+  git -C "$repo" init -q -b main
+  mkdir -p "$repo/.claude"
+  printf '.claude/worktrees/\n.claude/state/\n' > "$repo/.gitignore"
+  printf '%s' '{ "gates": { "app": { "match": "^app/", "dir": "app", "run": ["false"] } } }' \
+    > "$repo/.claude/harness.json"
+  git -C "$repo" add -A
+  git -C "$repo" -c user.email=t@t -c user.name=t commit -q -m init
+  git -C "$repo" remote add origin https://example.invalid/r.git
+  git -C "$repo" symbolic-ref refs/remotes/origin/HEAD refs/remotes/origin/main
+  git -C "$repo" checkout -q -b integration
+  mkdir -p "$repo/$(dirname "$on_target")"
+  printf 'x\n' > "$repo/$on_target"
+  git -C "$repo" add -A
+  git -C "$repo" -c user.email=t@t -c user.name=t commit -q -m "already on the target"
+  wt="$repo/.claude/worktrees/w"
+  git -C "$repo" worktree add -q -b worktree-w "$wt" integration > /dev/null 2>&1
+  mkdir -p "$wt/$(dirname "$in_worktree")"
+  printf 'y\n' > "$wt/$in_worktree"
+  git -C "$wt" add -A
+  git -C "$wt" -c user.email=t@t -c user.name=t commit -q -m "this session's work"
+  [[ -n "$sub" ]] && mkdir -p "$wt/$sub"
+  jq -nc --arg c "$wt${sub:+/$sub}" '{stop_hook_active:false, session_id:"baseline", cwd:$c}' |
+    Z_HARNESS_HOOK_LOG="$repo/.git/log.jsonl" CLAUDE_PROJECT_DIR="$repo" \
+      bash "$ROOT/hooks/verify-before-stop.sh" > /dev/null 2>&1
+  got=$?
+  rm -rf "$repo"
+  expect_eq "$want" "$got" "stop baseline: $name"
+}
+baseline_case 0 "work already on the target does not dispatch its gate" app/other.ts notes.txt
+baseline_case 2 "work done in the worktree still dispatches its gate"   notes.txt app/mine.ts
+# A session whose shell last `cd`-ed into a subdirectory stops from there. Taken as the worktree, that
+# subdirectory became the tree every gate's `dir` was looked up in: the gate read "directory missing",
+# noted it and let a red gate through.
+baseline_case 2 "a stop from a subdirectory still runs the gate at the worktree root" \
+  notes.txt app/mine.ts tools/e2e
+
+# --- 16. guard-push ------------------------------------------------------------------------------
+# A deny rule matches a prefix, and "reaches the publish branch" is not one. The hook has to recognise
+# every spelling that lands there — a bare push with it checked out, `HEAD:main`, `:main`, an alias,
+# `sh -c` — and must still let a feature branch through, or it is a deny list with extra steps.
+
+PUSH_REPO=$(mktemp -d)
+PUSH_REPO=$(cd "$PUSH_REPO" && pwd -P)
+git init -q --bare "$PUSH_REPO/origin.git"
+git init -q -b main "$PUSH_REPO/repo"
+git -C "$PUSH_REPO/repo" -c user.email=t@t -c user.name=t commit -q --allow-empty -m init
+git -C "$PUSH_REPO/repo" remote add origin "$PUSH_REPO/origin.git"
+git -C "$PUSH_REPO/repo" push -q origin main 2>/dev/null
+git -C "$PUSH_REPO/repo" symbolic-ref refs/remotes/origin/HEAD refs/remotes/origin/main
+git -C "$PUSH_REPO/repo" branch feature
+git -C "$PUSH_REPO/repo" config alias.p push
+git -C "$PUSH_REPO/repo" config alias.sync '!git fetch && git push'
+
+# $1 expected exit, $2 branch checked out, $3 command
+push_case() {
+  local want="$1" branch="$2" cmd="$3" got
+  git -C "$PUSH_REPO/repo" checkout -q "$branch"
+  ( cd "$PUSH_REPO/repo" && jq -nc --arg c "$cmd" --arg d "$PUSH_REPO/repo" \
+      '{tool_name:"Bash", session_id:"pushtest", cwd:$d, tool_input:{command:$c}}' |
+    Z_HARNESS_HOOK_LOG="$PUSH_REPO/log.jsonl" CLAUDE_PROJECT_DIR="$PUSH_REPO/repo" \
+      bash "$ROOT/hooks/guard-push.sh" ) > /dev/null 2>&1
+  got=$?
+  expect_eq "$want" "$got" "push on $branch: $cmd"
+}
+
+push_case 0 feature 'git push origin feature'
+push_case 0 feature 'git push -u origin feature'
+push_case 0 feature 'git push'
+push_case 0 feature 'git push origin HEAD'
+push_case 0 feature 'git push origin feature 2>&1 | tail -5'
+push_case 0 feature 'git p origin feature'
+push_case 0 feature 'git push origin main:refs/heads/backup-main'
+push_case 0 feature 'git push --dry-run origin main'
+push_case 0 feature 'git push --tags'
+push_case 0 feature "grep -rn 'git push origin main' ."
+push_case 0 feature 'git commit -m "push to main later"'
+push_case 2 main    'git push'
+push_case 2 main    'git push origin HEAD'
+push_case 2 feature 'git push origin main'
+push_case 2 feature 'git push origin "main"'
+push_case 2 feature 'git push origin HEAD:main'
+push_case 2 feature 'git push -f origin +feature:refs/heads/main'
+push_case 2 feature 'git push origin :main'
+push_case 2 feature 'git push --delete origin main'
+push_case 2 feature 'git push --all origin'
+push_case 2 feature 'git push origin feature && git push origin main'
+push_case 2 feature 'git -c push.default=matching push'
+push_case 2 feature 'git push origin refs/heads/*:refs/heads/*'
+push_case 2 feature 'git p origin main'
+push_case 2 feature 'git sync'
+push_case 2 feature 'sh -c "git push origin main"'
+push_case 2 feature 'eval git push origin main'
+push_case 2 feature 'timeout 30 git push origin main'
+# The destination is not in the text, so it cannot be shown not to be protected.
+push_case 2 feature 'git push origin $BRANCH'
+push_case 2 feature 'git push origin $(git branch --show-current)'
+push_case 2 feature 'echo x | xargs git push origin'
+push_case 2 main    "cd /tmp && cd $PUSH_REPO/repo && git push"
+
+# The log line carries the payload's session id unchanged. Piping jq into `tr -c` once logged
+# `pushtest_`, so the decisions never joined up with the other hooks' lines for a session.
+expect_eq "pushtest" "$(grep '"hook":"guard-push"' "$PUSH_REPO/log.jsonl" | tail -1 | jq -r '.session')" \
+  "push: the log carries the session id it was given"
+
+# Unconfigured, the protected branch is whatever origin/HEAD names, so a rename does not open a hole.
+git -C "$PUSH_REPO/repo" branch release
+git -C "$PUSH_REPO/repo" symbolic-ref refs/remotes/origin/HEAD refs/remotes/origin/release
+push_case 2 feature 'git push origin release'
+
+# A declared list replaces the default, and an empty one turns the guard off.
+mkdir -p "$PUSH_REPO/repo/.claude"
+printf '%s' '{"push":{"protectedBranches":["main","prod"]}}' > "$PUSH_REPO/repo/.claude/harness.json"
+push_case 2 feature 'git push origin prod'
+push_case 2 feature 'git push origin main'
+push_case 0 feature 'git push origin release'
+printf '%s' '{"push":{"protectedBranches":[]}}' > "$PUSH_REPO/repo/.claude/harness.json"
+push_case 0 feature 'git push origin main'
+rm -rf "$PUSH_REPO"
 
 printf '\nhooks: %d passed' "$PASS"
 if [[ $FAIL -gt 0 ]]; then printf ', %d FAILED\n' "$FAIL"; exit 1; fi

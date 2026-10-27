@@ -68,13 +68,15 @@ _hook_log_rotate() {
 
 # Appends one decision.
 #
-# $1 hook name          auto-worktree | require-plan | any hook the installing repository adds
+# $1 hook name          auto-worktree | require-plan | check-content-rules | check-conventions |
+#                       verify-before-stop | guard-push | any hook the installing repository adds
 # $2 session id         already sanitised by the caller, or "-"
 # $3 tool               Edit | Write | Bash | -
 # $4 decision           allow | block | note
 # $5 target             a path, or a command truncated by the caller
-# $6 reason             I1 | I3 | I7 | I8 | KV_TTL | secret | bash-write | not-in-worktree |
-#                       gate-failed | docker-absent | conventions | ok
+# $6 reason             bash-write | not-in-worktree | content-rule | shell-unreadable |
+#                       gate-failed | gate-released | merge-released | review-missing | conventions |
+#                       push-protected | push-ok | push-dry-run | ok
 #
 # Never fails the caller. A hook that cannot write its log must still return the right verdict, so
 # every failure path here is swallowed: logging must not be able to turn an allow into a block.

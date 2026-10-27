@@ -123,7 +123,15 @@ sensitive_relpath() {
   # Both forms: the payload may give a path relative to a worktree, or an absolute one whose
   # worktree segment sits in the middle.
   path="${path#.claude/worktrees/*/}"
-  path="${path##*/.claude/worktrees/*/}"
+  # Not `##*/.claude/worktrees/*/`: the trailing `*` matches slashes too, and `##` takes the longest
+  # match, so that stripped everything up to the last `/` and left a bare file name no rule matches.
+  # Upstream that let a worktree write through every content rule, the plan gate and the review
+  # receipt whenever CLAUDE_PROJECT_DIR was unset. Strip through `worktrees/`, then exactly one
+  # segment — the worktree's name.
+  if [[ "$path" == */.claude/worktrees/*/* ]]; then
+    path="${path##*/.claude/worktrees/}"
+    path="${path#*/}"
+  fi
   printf '%s' "$path"
 }
 

@@ -117,14 +117,24 @@ _bash_write_strip_heredocs() {
 #
 # A quoted span is an argument. Matching shell syntax inside one is how `grep -rn 'tee -a' .` came
 # to be reported as a write to a file called `-a`.
+#
+# The quote state carries across lines, because the shell's does. It used to reset on every line, so a
+# multi-line `node -e '…'` lost its quote at the first newline and the script body was matched as
+# shell: `x=>x.ok` read as a redirect into a file called `x.ok`, and a contact-sheet script was refused
+# with eight "targets" that were fragments of JavaScript. Carrying the state makes an unbalanced quote
+# expensive — everything after it is blanked — and the one place an apostrophe appears unbalanced in
+# real commands is a comment, so comments outside quotes are dropped the way the shell drops them.
 _bash_write_blank_quotes() {
   awk '
+    BEGIN { quote = "" }
     {
       out = ""
-      quote = ""
       n = length($0)
       for (i = 1; i <= n; i++) {
         c = substr($0, i, 1)
+        # A `#` that starts a word outside quotes begins a comment, which runs to the end of the line.
+        # Not `${#x}` or `$#`: those follow a `{` or `$`, never whitespace or a separator.
+        if (quote == "" && c == "#" && (i == 1 || substr($0, i - 1, 1) ~ /[ \t;&|(]/)) break
         # A backslash escapes the next character everywhere except inside single quotes, where the
         # shell treats it literally. Without this, an escaped `\"` inside a double-quoted span read
         # as the closing quote, so the rest of that argument was matched as shell syntax: a
@@ -182,16 +192,41 @@ bash_write_targets() {
   # the documented way a hook gets deleted.
   local base=""
 
+  # Variables this command assigns a literal value to, as `NAME<TAB>value` lines, so that a later
+  # `$NAME/file` can be read as the path it is. Without it, `X=/private/tmp/s; cp a $X/b.png` was
+  # reported as a write to <repo>/$X/b.png and refused — three times in one session that wrote only
+  # to its scratchpad. Only unquoted literals are recorded: a quoted value has been blanked by the time
+  # segments are read, and a value holding `$` or a backtick cannot be resolved by reading text. An
+  # unknown variable stays unresolved, which is the old, stricter behaviour.
+  local vars=""
+
+  # Rewrites a leading `$NAME` or `${NAME}` (followed by `/` or nothing) to its recorded value.
+  local expand_var
+  expand_var() {
+    local path="$1" line name val
+    while IFS=$'\t' read -r name val; do
+      [[ -n "$name" ]] || continue
+      case "$path" in
+        "\$$name" | "\${$name}") path="$val" ;;
+        "\$$name"/*) path="$val/${path#\$"$name"/}" ;;
+        "\${$name}"/*) path="$val/${path#\$\{"$name"\}/}" ;;
+      esac
+    done <<< "$vars"
+    printf '%s' "$path"
+  }
+
   local add
   # Relative candidates are resolved against `base` when one is known, so that the exemption tests
   # further down see the path the command would actually write.
   add() {
     [[ -n "$1" ]] || return 0
-    if [[ -n "$base" && "$1" != /* ]]; then
-      candidates+="$base/$1
+    local path
+    path=$(expand_var "$1")
+    if [[ -n "$base" && "$path" != /* ]]; then
+      candidates+="$base/$path
 "
     else
-      candidates+="$1
+      candidates+="$path
 "
     fi
   }
@@ -213,13 +248,35 @@ bash_write_targets() {
     first=$(awk '{ for (i = 1; i <= NF; i++) if ($i !~ /=/) { print $i; exit } }' <<< "$segment")
     first="${first##*/}"
 
+    # A segment that only assigns (`X=/abs/path`, or `export X=…`) records its literal values. One
+    # that assigns something unreadable forgets any earlier value of that name rather than keeping a
+    # stale one.
+    if [[ -z "$first" || "$first" == export ]]; then
+      local word name val
+      local -a words=()
+      # `read -a` rather than an unquoted `$segment`, which would glob `X=*.png` against the cwd.
+      read -ra words <<< "$segment"
+      for word in "${words[@]}"; do
+        [[ "$word" == *=* ]] || continue
+        name="${word%%=*}"
+        val="${word#*=}"
+        [[ "$name" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
+        vars=$(printf '%s\n' "$vars" | awk -F'\t' -v n="$name" '$1 != n')
+        case "$val" in
+          "" | *'$'* | *'`'*) ;;
+          *) vars+=$'\n'"$name"$'\t'"$val" ;;
+        esac
+      done
+      continue
+    fi
+
     # A `cd` changes where every later relative path in this command lands. Resolved for the literal
     # forms only — absolute, `~/…`, and relative-to-wherever-we-are. Anything with a `$` in it cannot
     # be resolved by reading text, and there the base goes back to unknown so the old, stricter
     # behaviour applies: better to over-report a write than to miss one because a variable was opaque.
     if [[ "$first" == cd ]]; then
       local target_dir
-      target_dir=$(_bash_write_first_arg "$segment")
+      target_dir=$(expand_var "$(_bash_write_first_arg "$segment")")
       case "$target_dir" in
         "" | *'$'* | *'`'*) base="" ;;
         /*) base="${target_dir%/}" ;;

@@ -73,8 +73,9 @@ naming paths is how the upstream version failed, when the same generator wrote a
 had added to the list.
 
 **Gate before stop** (`verify-before-stop.sh`, `Stop`). Works out what the session changed, runs the
-gates that cover it, and blocks the stop while any of them is red. Then merges the worktree branch —
-fast-forward only, and only once the gates are green. See [Gates](#gates).
+gates that cover it, and blocks the stop while any of them is red. Then merges the worktree branch
+back onto the branch it was cut from — fast-forward only, and only once the gates are green. See
+[Gates](#gates) and [Where the merge goes](#where-the-merge-goes).
 
 **Merge helper** (`merge-worktree.sh`). The merge itself, also runnable by hand from anywhere:
 
@@ -85,6 +86,15 @@ bash <plugin>/hooks/merge-worktree.sh <worktree path>
 Fast-forward only, so a branch that has fallen behind is refused with the rebase to run rather than
 merged. Refuses a dirty worktree, and a main working tree with uncommitted changes to tracked files —
 untracked files there do not block it.
+
+**Push guard** (`guard-push.sh`, `PreToolUse`). Lets `git push` through to any branch except a
+protected one — by default the branch the repository publishes from. A deny rule matches a command
+prefix, and "reaches `main`" is not a prefix: `git push` with `main` checked out, `HEAD:main`,
+`+x:refs/heads/main`, `--all`, an alias, `sh -c "git push …"` all get there. So this reads the command
+the way git would — global options, aliases, refspecs, `remote.<name>.push`, `push.default`, and the
+branch checked out where the command runs. A destination it cannot read from the text (`$BRANCH`,
+`$(…)`, `xargs git push`) is refused; `--dry-run` is always allowed. See
+[Push guard](#push-guard).
 
 ## Install
 
@@ -144,8 +154,10 @@ Every file edit must happen inside a git worktree. The main working tree is for 
    `git update-ref`: that moves the pointer without touching the main tree's index, so main
    immediately reports the whole merge as staged changes in reverse.
 
-If the merge is refused because the branch has diverged, `git rebase main` inside the worktree and
-stop again. If you are told the merge is still failing, the work is on the branch and nowhere else —
+If the merge is refused because the branch has diverged, run the rebase it prints (onto the branch
+the worktree was cut from, not necessarily `main`) inside the worktree and stop again. If it says the
+target is the branch this repository publishes from, the work stays on the worktree branch: tell the
+user and give them the command it printed. If you are told the merge is still failing, the work is on the branch and nowhere else —
 say so, name the branch, and do not report the task as merged.
 
 Editing any path listed in `.claude/harness.json`, or anything under `.claude/`, requires a plan
@@ -268,6 +280,40 @@ is what makes the condition observable. Keyed to HEAD, so committing again inval
 different diff. Stated limit — an agent that writes the file without reading anything passes. This
 guards against forgetting, not against intent.
 
+## Where the merge goes
+
+The worktree is merged back onto the branch **checked out in the main working tree** — the branch the
+worktree was cut from — because that is the branch `git merge --ff-only` run there advances. The gate
+baseline is the same branch, so a worktree cut from a long-lived feature branch is judged by its own
+commits, not by the whole feature. Upstream, the old baseline (the default branch) measured 73 files
+and four gates on every stop for a worktree whose own diff was empty.
+
+The branch the repository **publishes from** — `origin/HEAD`, else a local `main` or `master` — is not
+merged into automatically. When the main tree has it checked out, the stop says so, keeps the
+worktree, and prints the command for a person to run. Exit 0, not a block: nothing the session could
+edit would change the answer. Two ways to have the merge happen anyway:
+
+- check out an integration branch in the main working tree; worktrees are cut from it and merged back
+  onto it (set `worktree.baseRef` to `"head"` in `.claude/settings.json` so they are cut from it), or
+- opt in, once, in `.claude/harness.json`:
+
+```json
+{ "merge": { "intoDefaultBranch": true } }
+```
+
+A main tree on a detached HEAD has nothing to fast-forward; the merge is skipped and the stop says so.
+
+## Push guard
+
+```json
+{ "push": { "protectedBranches": ["main", "release"] } }
+```
+
+With no list, the protected branch is the one the repository publishes from. A list replaces that
+default; an empty list turns the guard off. Like everything here it guards against accident, not
+intent: a script that pushes, or `gh api` writing the ref, walks past it. Server-side branch
+protection is the real lock.
+
 ## Tests
 
 ```bash
@@ -287,4 +333,7 @@ Three classes of case, and skipping any of them has cost this code before:
    Without that strip, every check silently misses every edit, since every edit happens in a worktree.
 
 The suite is mutation-tested: removing an execute bit, or widening the sensitive-path regex to match
-everything, both turn it red.
+everything, both turn it red. So do reverting each fix ported from upstream — the merge target, the
+gate baseline, the worktree root found from a subdirectory, the worktree-prefix strip, the write
+detector's variables and multi-line quotes, the here-string that survives text over 64 KiB, and the
+push guard's protected-branch check.
