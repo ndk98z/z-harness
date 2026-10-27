@@ -113,6 +113,15 @@ OLD_TEXT=$(printf '%s' "$INPUT" | jq -r '
   [ .old_string?, .old_source?, (.edits // [])[]?.old_string? ]
   | map(select(type == "string")) | join("\n")' 2>/dev/null)
 
+# True when the extended regex $1 matches anywhere in $2.
+#
+# A here-string rather than `printf '%s' "$2" | grep -q`: under `set -o pipefail` grep -q exits at its
+# first match, the writer takes SIGPIPE once the text is larger than a pipe buffer (64 KiB), and the
+# pipeline reports failure — a match read as no match. Upstream that flipped checks both ways on one
+# 88 KB file: false refusals of the committed file, and `forbid` rules that skipped the very text they
+# exist for. Every content check below goes through this; the suite pins it with files over 64 KiB.
+text_matches() { grep -qE -- "$1" <<< "$2"; }
+
 VIOLATIONS=""
 REFUSED_SHELL=""
 
@@ -138,7 +147,7 @@ while IFS= read -r target; do
     fi
 
     forbid=$(printf '%s' "$rule" | jq -r '.forbid // empty')
-    if [[ -n "$forbid" && -n "$NEW_TEXT" ]] && printf '%s' "$NEW_TEXT" | grep -qE "$forbid"; then
+    if [[ -n "$forbid" && -n "$NEW_TEXT" ]] && text_matches "$forbid" "$NEW_TEXT"; then
       VIOLATIONS+="  $rel — writes text matching /$forbid/
     $why
 "
@@ -150,8 +159,8 @@ while IFS= read -r target; do
     # replacement is empty, which no rule phrased as "what does the new text say" can see at all.
     require=$(printf '%s' "$rule" | jq -r '.require // empty')
     if [[ -n "$require" && -n "$OLD_TEXT" ]] \
-      && printf '%s' "$OLD_TEXT" | grep -qE "$require" \
-      && ! printf '%s' "$NEW_TEXT" | grep -qE "$require"; then
+      && text_matches "$require" "$OLD_TEXT" \
+      && ! text_matches "$require" "$NEW_TEXT"; then
       VIOLATIONS+="  $rel — removes text matching /$require/
     $why
 "

@@ -113,9 +113,16 @@ PAYLOAD_CWD=$(printf '%s' "$INPUT" | jq -r '.cwd // empty')
 SESSION_CWD="${PAYLOAD_CWD:-$PWD}"
 
 resolve_worktree() {
-  local count=0 pick="" line path
+  local count=0 pick="" line path root
   if is_session_worktree "$SESSION_CWD"; then
-    printf '%s' "$SESSION_CWD"
+    # The worktree's root, not the cwd itself. The cwd is wherever the session's shell last `cd`-ed
+    # to, and used as-is it made WORK_DIR a subdirectory: every gate's `dir` was looked up under it and
+    # reported missing, and receipts were looked for in `<subdir>/.claude/state/` and reported missing
+    # too, while both sat at the root. Upstream that blocked two stops in one session, each time with
+    # advice to install dependencies that were installed. Asking git rather than trimming the path,
+    # because a worktree name may itself contain slashes.
+    root=$(git -C "$SESSION_CWD" rev-parse --show-toplevel 2>/dev/null || true)
+    printf '%s' "${root:-$SESSION_CWD}"
     return 0
   fi
 
@@ -139,8 +146,6 @@ WORKTREE=$(resolve_worktree)
 WORK_DIR="${WORKTREE:-$PROJECT_DIR}"
 cd "$WORK_DIR" || exit 0
 
-MAIN_BRANCH=$(main_branch_name "$PROJECT_DIR")
-
 # Uncommitted work. Comparing against the main branch on every stop would re-run every gate for
 # changes already committed earlier in the branch, which makes the hook slow enough that someone turns
 # it off.
@@ -153,8 +158,21 @@ CHANGED=$(git status --porcelain -uall 2>/dev/null | sed 's/^...//' | tr -d '"')
 # A worktree branch is one unit of work, and the merge below refuses a dirty tree. Judging it by
 # uncommitted files alone would mean committing — the step that makes the merge possible — is what
 # makes every gate skip.
+#
+# The baseline is the branch the worktree was cut from and merges back onto, not the repository's
+# default branch. Against the default branch it was wrong by exactly the distance between the two, and
+# on a long-lived feature branch that distance is the whole feature: upstream, a worktree whose own diff
+# was empty still measured 73 changed files and dispatched four gates on every stop. Those commits
+# passed their own gates when they were made; re-running them is minutes of nothing, and a gate slow
+# enough to resent is a gate somebody switches off.
+#
+# A detached main working tree leaves the target empty, and the fallback is the default branch: a
+# baseline that is too wide runs gates that did not need running, while no baseline at all runs none.
+TARGET_BRANCH=""
 if [[ -n "$WORKTREE" ]]; then
-  BASE=$(git merge-base "$MAIN_BRANCH" HEAD 2>/dev/null || true)
+  TARGET_BRANCH=$(target_branch_name "$PROJECT_DIR")
+  [[ -n "$TARGET_BRANCH" ]] || TARGET_BRANCH=$(default_branch_name "$PROJECT_DIR")
+  BASE=$(git merge-base "$TARGET_BRANCH" HEAD 2>/dev/null || true)
   if [[ -n "$BASE" ]]; then
     CHANGED=$(printf '%s\n%s\n' "$CHANGED" "$(git diff --name-only "$BASE" HEAD 2>/dev/null)")
   fi
@@ -168,9 +186,13 @@ if [[ -z "$CHANGED" && -z "$WORKTREE" ]]; then
 fi
 
 # True when any changed path matches the pattern.
+#
+# A here-string rather than `printf | grep -q`: under `set -o pipefail` grep -q exits at its first
+# match, the writer takes SIGPIPE once the text is larger than a pipe buffer (64 KiB), and the pipeline
+# reports failure — a match read as no match. A branch that renames a few thousand files reaches that.
 touched() {
   [[ -n "${1:-}" ]] || return 1
-  printf '%s\n' "$CHANGED" | grep -qE "$1"
+  grep -qE -- "$1" <<< "$CHANGED"
 }
 
 FAILURES=""
@@ -376,9 +398,9 @@ if [[ "$MERGE_EXIT" -ne 0 ]]; then
   if [[ "$MERGE_ATTEMPT" -ge "$MAX_ATTEMPTS" ]]; then
     cat >&2 <<EOF
 THE MERGE IS STILL FAILING after $MERGE_ATTEMPT attempts. The stop is being allowed through so the
-session does not loop forever, but THE WORK IS NOT ON $MAIN_BRANCH. It is committed on the worktree
-branch and nowhere else. Tell the user that, name the branch, and give them the merge command — do
-not report the task as finished or as merged.
+session does not loop forever, but THE WORK IS NOT ON ${TARGET_BRANCH:-the target branch}. It is
+committed on the worktree branch and nowhere else. Tell the user that, name the branch, and give them
+the merge command — do not report the task as finished or as merged.
 $MERGE_OUTPUT
 EOF
     hook_log verify-before-stop "$SESSION_ID" - note \
