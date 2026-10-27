@@ -590,6 +590,7 @@ printf 'b\n' > "$BRANCHED/.claude/worktrees/w/app/new.ts"
 git -C "$BRANCHED/.claude/worktrees/w" add -A
 git -C "$BRANCHED/.claude/worktrees/w" commit -qm "committed work"
 
+# Runs the stop hook from the BRANCHED worktree and prints its exit code.
 branched_run() {
   printf '{"session_id":"branched","stop_hook_active":false,"cwd":"%s"}' "$BRANCHED/.claude/worktrees/w" \
     | Z_HARNESS_HOOK_LOG="$BRANCHED/.git/log.jsonl" CLAUDE_PROJECT_DIR="$BRANCHED" \

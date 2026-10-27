@@ -1,0 +1,51 @@
+name: test
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  hooks:
+    name: hooks (${{ matrix.name }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux, current bash
+            os: ubuntu-latest
+            bash32: false
+          # Hooks run under macOS's /bin/bash 3.2 on every Mac without Homebrew bash, and that shell is
+          # where `set -u` with an empty array, or a bash 4 builtin, breaks.
+          - name: macos, /bin/bash 3.2
+            os: macos-latest
+            bash32: true
+    steps:
+      - uses: actions/checkout@v4
+
+      # The suite and the hooks it drives are started with `bash …` and `#!/usr/bin/env bash`, which
+      # both resolve through PATH. A directory in front of PATH whose `bash` is /bin/bash makes all of
+      # them run under 3.2, not only the top-level script.
+      - name: Put /bin/bash first on PATH
+        if: matrix.bash32
+        run: |
+          mkdir -p "$RUNNER_TEMP/bash32"
+          ln -sf /bin/bash "$RUNNER_TEMP/bash32/bash"
+          echo "$RUNNER_TEMP/bash32" >> "$GITHUB_PATH"
+
+      - name: Tool versions
+        run: |
+          bash --version | head -1
+          git --version
+          jq --version
+
+      - name: Require bash 3.2 on the macOS job
+        if: matrix.bash32
+        run: bash -c '[[ "${BASH_VERSINFO[0]}" == 3 ]]' || { echo "expected bash 3.x on PATH"; exit 1; }
+
+      - name: Run the suite
+        run: bash tests/test-hooks.sh

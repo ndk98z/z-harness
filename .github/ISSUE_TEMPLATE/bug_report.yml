@@ -1,0 +1,74 @@
+name: Bug report
+description: A hook blocked something it should have allowed, allowed something it should have blocked, or broke.
+labels: ["bug"]
+body:
+  - type: dropdown
+    id: kind
+    attributes:
+      label: What went wrong
+      options:
+        - It blocked something it should have allowed (false refusal)
+        - It allowed something it should have blocked (missed block)
+        - The stop or the merge did the wrong thing
+        - A hook crashed or printed an error
+        - Something else
+    validations:
+      required: true
+  - type: dropdown
+    id: hook
+    attributes:
+      label: Which hook
+      options:
+        - auto-worktree.sh
+        - require-plan.sh
+        - check-content-rules.sh
+        - check-conventions.sh
+        - verify-before-stop.sh / merge-worktree.sh
+        - guard-push.sh
+        - progress-reader agent
+        - Not sure
+    validations:
+      required: true
+  - type: textarea
+    id: input
+    attributes:
+      label: The command or tool call
+      description: The shell command, or the Edit/Write payload, that was mishandled. Trim file contents to what matters, and remove anything private.
+      render: shell
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: What the hook did
+      description: Its exit code and message. For a stop, the whole stop-hook output.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What it should have done
+    validations:
+      required: true
+  - type: textarea
+    id: config
+    attributes:
+      label: .claude/harness.json
+      description: The relevant parts, if the repository has one.
+      render: json
+  - type: textarea
+    id: log
+    attributes:
+      label: Decision log lines
+      description: |
+        The matching lines from the hook log, which holds paths and reason codes, never file contents:
+        `tail -20 "$(git rev-parse --git-common-dir)/z-harness-hooks.jsonl"`
+      render: json
+  - type: input
+    id: env
+    attributes:
+      label: Environment
+      description: z-harness version, OS, `bash --version | head -1`, `git --version`, `jq --version`
+      placeholder: "0.6.0, macOS 15, GNU bash 3.2.57, git 2.47.0, jq-1.7.1"
+    validations:
+      required: true

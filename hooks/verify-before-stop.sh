@@ -112,6 +112,7 @@ is_session_worktree() {
 PAYLOAD_CWD=$(printf '%s' "$INPUT" | jq -r '.cwd // empty')
 SESSION_CWD="${PAYLOAD_CWD:-$PWD}"
 
+# Prints the root of the session worktree this stop belongs to, or nothing for a main-tree session.
 resolve_worktree() {
   local count=0 pick="" line path root
   if is_session_worktree "$SESSION_CWD"; then
